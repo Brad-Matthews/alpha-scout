@@ -1,0 +1,4 @@
+httpx
+python-telegram-bot[asyncio]
+google-generativeai
+Pillow

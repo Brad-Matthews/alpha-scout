@@ -1,0 +1,47 @@
+name: Alpha Scout Daily Scan
+
+on:
+  schedule:
+    - cron: '0 14 * * *'   # 8:00 AM Denver MDT = 14:00 UTC
+  workflow_dispatch:        # Allow manual trigger
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Alpha Scout
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ETSY_API_KEY: ${{ secrets.ETSY_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python alpha_scout.py
+
+      - name: Commit updated history
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update history.json after daily scan"
+          file_pattern: history.json
+
+      - name: Alert on failure
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="❌ Alpha Scout FAILED — GitHub Actions workflow error. Check: https://github.com/${{ github.repository }}/actions" \
+            -d parse_mode="HTML"
