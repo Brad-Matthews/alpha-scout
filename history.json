@@ -2072,14 +2072,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "antique-19th-century-salvaged-green-floral-tile-6x62-available-4456f": {
-      "title": "Antique 19th Century Salvaged Green Floral Tile (6x6)(2 Available)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 15.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "antique-800-silver-carved-shell-left-facing-cameo-brooch-pin-w-pendant-bail-15-e69bf": {
       "title": "Antique 800 Silver Carved Shell Left Facing Cameo Brooch Pin w/ Pendant Bail (1.5\")",
       "first_seen": "2026-04-04",
@@ -4360,14 +4352,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "braided-wicker-basket-with-handles-4x15x7-df252": {
-      "title": "Braided Wicker Basket with Handles (4x15x7)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 14.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "braided-wicker-basket-with-handles-8x10x9-9322c": {
       "title": "Braided Wicker Basket with Handles (8x10x9)",
       "first_seen": "2026-04-04",
@@ -4909,14 +4893,6 @@
       "first_seen": "2026-04-04",
       "last_seen": "2026-04-04",
       "last_seen_price": 60.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
-    "carved-african-mask-10-7d1e2": {
-      "title": "Carved African Mask (~10\")",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 13.0,
       "alerted": false,
       "gemini_category": "unknown"
     },
@@ -9312,14 +9288,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "green-foliage-wreath-22-1c384": {
-      "title": "Green Foliage Wreath (22\")",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 14.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "green-ladder-back-wicker-seat-chair-42x18x15-1bcf6": {
       "title": "Green Ladder Back Wicker Seat Chair (42x18x15)",
       "first_seen": "2026-04-04",
@@ -10197,14 +10165,6 @@
       "first_seen": "2026-04-04",
       "last_seen": "2026-04-04",
       "last_seen_price": 22.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
-    "haviland-limoges-schleiger-52b-luncheon-plate-8-34-10-available-cdbf8": {
-      "title": "Haviland Limoges Schleiger #52b Luncheon Plate (8 3/4\") (10 Available)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 5.0,
       "alerted": false,
       "gemini_category": "unknown"
     },
@@ -11201,7 +11161,7 @@
       "gemini_category": "unknown"
     }
   },
-  "last_run": "2026-04-04T08:40:32.174333-06:00",
-  "run_count": 2,
+  "last_run": "2026-04-04T12:17:27.056192-06:00",
+  "run_count": 3,
   "gemini_calls_today": 1400
 }
