@@ -2,27 +2,23 @@ name: Alpha Scout Daily Scan
 
 on:
   schedule:
-    - cron: '0 14 * * *'   # 8:00 AM Denver MDT = 14:00 UTC
-  workflow_dispatch:        # Allow manual trigger
+    - cron: '0 14 * * *'
+  workflow_dispatch:
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - run: pip install -r requirements.txt
 
       - name: Run Alpha Scout
         env:
@@ -49,5 +45,5 @@ jobs:
         run: |
           curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
             -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="❌ Alpha Scout FAILED — GitHub Actions workflow error. Check: https://github.com/${{ github.repository }}/actions" \
+            -d text="❌ Alpha Scout FAILED — Check: https://github.com/${{ github.repository }}/actions" \
             -d parse_mode="HTML"
