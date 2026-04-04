@@ -1560,14 +1560,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "316l-stainless-steel-multi-gemstone-chakra-ring-sz-8-d178a": {
-      "title": "316L Stainless Steel Multi-Gemstone Chakra Ring sz 8",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 26.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "316l-stainless-steel-turquoise-graduated-stone-link-bracelet-8-20c68": {
       "title": "316L Stainless Steel Turquoise Graduated Stone Link Bracelet (8\")",
       "first_seen": "2026-04-04",
@@ -2722,14 +2714,6 @@
     },
     "antique-victorian-sunstone-cube-hat-pin-115-574e0": {
       "title": "Antique Victorian Sunstone Cube Hat Pin (11.5\")",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 40.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
-    "antique-vintage-american-brilliant-crystal-mcm-bowl-sawtooth-edge-3x9as-is-f1f05": {
-      "title": "Antique Vintage American Brilliant Crystal MCM Bowl Sawtooth Edge (3x9)(As Is)",
       "first_seen": "2026-04-04",
       "last_seen": "2026-04-04",
       "last_seen_price": 40.0,
@@ -11153,7 +11137,7 @@
       "gemini_category": "unknown"
     }
   },
-  "last_run": "2026-04-04T12:48:05.217438-06:00",
-  "run_count": 5,
+  "last_run": "2026-04-04T14:08:18.293243-06:00",
+  "run_count": 6,
   "gemini_calls_today": 1400
 }
