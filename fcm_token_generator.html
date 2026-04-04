@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Alpha Scout — FCM Token Generator</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background: #0d1117; color: #c9d1d9;
+            display: flex; justify-content: center; align-items: center;
+            min-height: 100vh; padding: 20px;
+        }
+        .card {
+            background: #161b22; border: 1px solid #30363d; border-radius: 12px;
+            padding: 40px; max-width: 600px; width: 100%; text-align: center;
+        }
+        h1 { color: #58a6ff; margin-bottom: 8px; font-size: 1.5em; }
+        .subtitle { color: #8b949e; margin-bottom: 32px; font-size: 0.9em; }
+        #status {
+            background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
+            padding: 16px; margin: 20px 0; min-height: 60px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 0.95em; line-height: 1.5;
+        }
+        #status.error { border-color: #f85149; color: #f85149; }
+        #status.success { border-color: #3fb950; color: #3fb950; }
+        #token-display {
+            display: none; margin-top: 20px; text-align: left;
+        }
+        #token-display label { display: block; color: #8b949e; margin-bottom: 8px; font-size: 0.85em; }
+        #token-value {
+            width: 100%; background: #0d1117; border: 1px solid #30363d;
+            border-radius: 8px; padding: 12px; color: #c9d1d9;
+            font-family: "SF Mono", "Fira Code", monospace; font-size: 0.8em;
+            word-break: break-all; resize: none; min-height: 80px;
+        }
+        button {
+            background: #238636; color: #fff; border: none; border-radius: 8px;
+            padding: 12px 24px; font-size: 1em; cursor: pointer; margin-top: 16px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #2ea043; }
+        button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+        #copy-btn { background: #1f6feb; }
+        #copy-btn:hover { background: #388bfd; }
+        .instructions {
+            text-align: left; margin-top: 32px; padding-top: 24px;
+            border-top: 1px solid #30363d; font-size: 0.85em; color: #8b949e;
+        }
+        .instructions h3 { color: #c9d1d9; margin-bottom: 12px; }
+        .instructions ol { padding-left: 20px; }
+        .instructions li { margin-bottom: 8px; line-height: 1.5; }
+        code { background: #0d1117; padding: 2px 6px; border-radius: 4px; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Alpha Scout</h1>
+        <p class="subtitle">FCM Device Token Generator</p>
+
+        <div id="status">Click the button below to generate your device token.</div>
+
+        <button id="generate-btn" onclick="requestToken()">Generate FCM Token</button>
+
+        <div id="token-display">
+            <label>Your FCM Device Token:</label>
+            <textarea id="token-value" readonly></textarea>
+            <button id="copy-btn" onclick="copyToken()">Copy to Clipboard</button>
+        </div>
+
+        <div class="instructions">
+            <h3>Before You Start</h3>
+            <p style="margin-bottom: 12px; color: #f0883e;">
+                <strong>Both <code>fcm_token_generator.html</code> and <code>firebase-messaging-sw.js</code>
+                must have your real Firebase config values filled in before use.</strong>
+                Replace every <code>YOUR_*</code> placeholder in both files with values from
+                Firebase Console &rarr; Project Settings &rarr; Your Apps &rarr; Web App.
+            </p>
+            <p style="margin-bottom: 16px;">
+                <strong>This page must be served over HTTPS</strong> &mdash; service workers do not work on
+                <code>file://</code> URLs. The easiest free option is GitHub Pages:
+            </p>
+            <ol style="margin-bottom: 24px;">
+                <li>Push both files to your <code>alpha-scout</code> repo.</li>
+                <li>Go to repo &rarr; <strong>Settings</strong> &rarr; <strong>Pages</strong>.</li>
+                <li>Under <em>Source</em>, select <strong>Deploy from a branch</strong>.</li>
+                <li>Set branch to <strong>main</strong> and folder to <strong>/ (root)</strong>, then click <strong>Save</strong>.</li>
+                <li>After a minute, open <code>https://&lt;your-username&gt;.github.io/alpha-scout/fcm_token_generator.html</code>.</li>
+            </ol>
+
+            <h3>Generate Your Token</h3>
+            <ol>
+                <li>Click <strong>Generate FCM Token</strong> above.</li>
+                <li>Allow notification permissions when prompted by your browser.</li>
+                <li>Copy the token that appears.</li>
+                <li>Go to your GitHub repo &rarr; <strong>Settings</strong> &rarr; <strong>Secrets and variables</strong> &rarr; <strong>Actions</strong>.</li>
+                <li>Add the token as <code>FCM_DEVICE_TOKEN_1</code> (Mac) or <code>FCM_DEVICE_TOKEN_2</code> (Android).</li>
+                <li>Repeat on each device you want to receive alerts on.</li>
+            </ol>
+        </div>
+    </div>
+
+    <!--
+        IMPORTANT: Replace the firebaseConfig values below with your own
+        from Firebase Console > Project Settings > Your Apps > Web App.
+    -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+        import { getMessaging, getToken } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-messaging.js";
+
+        // =====================================================================
+        // REPLACE THIS with your Firebase config from the Firebase Console.
+        // Firebase Console > Project Settings > Your Apps > Web App > Config.
+        // =====================================================================
+        const firebaseConfig = {
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT.firebaseapp.com",
+            projectId: "YOUR_PROJECT",
+            storageBucket: "YOUR_PROJECT.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const messaging = getMessaging(app);
+
+        window.requestToken = async function () {
+            const statusEl = document.getElementById("status");
+            const btn = document.getElementById("generate-btn");
+            const tokenDisplay = document.getElementById("token-display");
+            const tokenValue = document.getElementById("token-value");
+
+            btn.disabled = true;
+            statusEl.className = "";
+            statusEl.textContent = "Requesting notification permission...";
+
+            try {
+                const permission = await Notification.requestPermission();
+                if (permission !== "granted") {
+                    statusEl.className = "error";
+                    statusEl.textContent = "Notification permission denied. Please allow notifications and try again.";
+                    btn.disabled = false;
+                    return;
+                }
+
+                statusEl.textContent = "Permission granted. Fetching FCM token...";
+
+                const token = await getToken(messaging, {
+                    vapidKey: "YOUR_VAPID_KEY"  // Replace with your VAPID key from Firebase Console > Cloud Messaging > Web Push certificates
+                });
+
+                if (token) {
+                    statusEl.className = "success";
+                    statusEl.textContent = "Token generated successfully! Copy it below.";
+                    tokenValue.value = token;
+                    tokenDisplay.style.display = "block";
+                } else {
+                    statusEl.className = "error";
+                    statusEl.textContent = "Failed to generate token. Check your Firebase configuration.";
+                }
+            } catch (err) {
+                statusEl.className = "error";
+                statusEl.textContent = "Error: " + err.message;
+                console.error("FCM token error:", err);
+            }
+            btn.disabled = false;
+        };
+
+        window.copyToken = function () {
+            const tokenValue = document.getElementById("token-value");
+            tokenValue.select();
+            navigator.clipboard.writeText(tokenValue.value).then(() => {
+                const btn = document.getElementById("copy-btn");
+                const orig = btn.textContent;
+                btn.textContent = "Copied!";
+                setTimeout(() => { btn.textContent = orig; }, 2000);
+            });
+        };
+    </script>
+</body>
+</html>
