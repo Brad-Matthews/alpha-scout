@@ -115,12 +115,13 @@
         // Firebase Console > Project Settings > Your Apps > Web App > Config.
         // =====================================================================
         const firebaseConfig = {
-            apiKey: "YOUR_API_KEY",
-            authDomain: "YOUR_PROJECT.firebaseapp.com",
-            projectId: "YOUR_PROJECT",
-            storageBucket: "YOUR_PROJECT.appspot.com",
-            messagingSenderId: "YOUR_SENDER_ID",
-            appId: "YOUR_APP_ID"
+            apiKey: "AIzaSyAdYSov6-Hx48Zp4QyiTHgtJf776pXUJKI",
+            authDomain: "summed-b6f19.firebaseapp.com",
+            databaseURL: "https://summed-b6f19.firebaseio.com",
+            projectId: "summed-b6f19",
+            storageBucket: "summed-b6f19.firebasestorage.app",
+            messagingSenderId: "32835619262",
+            appId: "1:32835619262:web:71a625dcf44ab447b891ef"
         };
 
         const app = initializeApp(firebaseConfig);
@@ -148,7 +149,7 @@
                 statusEl.textContent = "Permission granted. Fetching FCM token...";
 
                 const token = await getToken(messaging, {
-                    vapidKey: "YOUR_VAPID_KEY"  // Replace with your VAPID key from Firebase Console > Cloud Messaging > Web Push certificates
+                    vapidKey: "BN47whEfqFMfXm1QJ7h9002i6V-bd1gapx4AGjcgw_ECLaEn5sXInQnmM5SbZVYkA5ebyqFr44uprXmBW8fyJrE"
                 });
 
                 if (token) {
