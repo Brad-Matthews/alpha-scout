@@ -148,8 +148,12 @@
 
                 statusEl.textContent = "Permission granted. Fetching FCM token...";
 
+                const registration = await navigator.serviceWorker.register(
+                    '/alpha-scout/firebase-messaging-sw.js'
+                );
                 const token = await getToken(messaging, {
-                    vapidKey: "BN47whEfqFMfXm1QJ7h9002i6V-bd1gapx4AGjcgw_ECLaEn5sXInQnmM5SbZVYkA5ebyqFr44uprXmBW8fyJrE"
+                    vapidKey: "BN47whEfqFMfXm1QJ7h9002i6V-bd1gapx4AGjcgw_ECLaEn5sXInQnmM5SbZVYkA5ebyqFr44uprXmBW8fyJrE",
+                    serviceWorkerRegistration: registration
                 });
 
                 if (token) {
