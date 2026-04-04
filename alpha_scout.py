@@ -476,40 +476,35 @@ def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_e
     return msg
 
 
+def escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML parse mode."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 def build_heartbeat(stats: dict) -> str:
+    """Build heartbeat message as plain HTML (no MarkdownV2)."""
     now = datetime.now(DENVER_TZ)
     s = stats
-    run_count_str = escape_md2(str(s['run_count']))
-    date_str = escape_md2(now.strftime('%B %d, %Y'))
-    time_str = escape_md2(now.strftime('%I:%M %p'))
-    total_str = escape_md2(str(s['total_scraped']))
-    new_str = escape_md2(str(s['new_items']))
-    skipped_str = escape_md2(str(s['skipped']))
-    drops_str = escape_md2(str(s['price_drops']))
-    alerts_str = escape_md2(str(s['alerts_sent']))
-    below_str = escape_md2(str(s['below_threshold']))
-    gemini_str = escape_md2(str(s['gemini_calls']))
-    budget_str = escape_md2(str(DAILY_GEMINI_BUDGET))
 
-    dry_prefix = "\\[DRY RUN\\] " if DRY_RUN else ""
+    dry_prefix = "[DRY RUN] " if DRY_RUN else ""
 
     msg = (
-        f"{dry_prefix}\U0001f916 Alpha Scout \u2014 Run \\#{run_count_str}\n\n"
-        f"\U0001f4c5 {date_str} \u2014 {time_str} Denver\n"
-        f"\U0001f50d Scraped: {total_str} items total\n"
-        f"\U0001f195 New items: {new_str}\n"
-        f"\u23ed Skipped \\(seen before\\): {skipped_str}\n"
-        f"\U0001f504 Re\\-evaluated \\(price drop\\): {drops_str}\n"
-        f"\u2705 Alerts sent: {alerts_str}\n"
-        f"\u274c Below threshold: {below_str}\n"
-        f"\U0001f916 Gemini calls used: {gemini_str} / {budget_str} daily budget\n\n"
+        f"{dry_prefix}\U0001f916 <b>Alpha Scout - Run #{s['run_count']}</b>\n\n"
+        f"\U0001f4c5 {escape_html(now.strftime('%B %d, %Y'))} - {escape_html(now.strftime('%I:%M %p'))} Denver\n"
+        f"\U0001f50d Scraped: <b>{s['total_scraped']}</b> items total\n"
+        f"\U0001f195 New items: <b>{s['new_items']}</b>\n"
+        f"\u23ed Skipped (seen before): <b>{s['skipped']}</b>\n"
+        f"\U0001f504 Re-evaluated (price drop): <b>{s['price_drops']}</b>\n"
+        f"\u2705 Alerts sent: <b>{s['alerts_sent']}</b>\n"
+        f"\u274c Below threshold: <b>{s['below_threshold']}</b>\n"
+        f"\U0001f916 Gemini calls used: <b>{s['gemini_calls']} / {DAILY_GEMINI_BUDGET}</b> daily budget\n\n"
     )
     if s.get("cold_start_remaining", 0) > 0:
-        remaining_str = escape_md2(str(s['cold_start_remaining']))
-        days_str = escape_md2(str(s.get('cold_start_days', '?')))
-        msg += f"Status: Cold start in progress: {gemini_str} processed, ~{remaining_str} remaining\\. Est\\. {days_str} days to full baseline\\."
+        remaining = s['cold_start_remaining']
+        est_days = s.get('cold_start_days', '?')
+        msg += f"Status: Cold start in progress: {s['gemini_calls']} processed, ~{remaining} remaining. Est. {est_days} days to full baseline."
     else:
-        msg += "Status: All clear \u2713"
+        msg += "Status: All clear"
     return msg
 
 # ---------------------------------------------------------------------------
@@ -829,8 +824,12 @@ async def main() -> None:
     heartbeat = build_heartbeat(stats)
     if DRY_RUN:
         log.info(f"[DRY RUN] Heartbeat:\n{heartbeat}")
-    else:
-        await send_telegram(bot, heartbeat)
+    elif bot:
+        try:
+            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=heartbeat,
+                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+        except Exception as e:
+            log.error(f"Telegram heartbeat send failed: {e}")
 
     # -----------------------------------------------------------------------
     # Save history
