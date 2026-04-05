@@ -4072,14 +4072,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "blue-painted-wood-planter-box-with-hearts-18x11x4-e0d4a": {
-      "title": "Blue Painted Wood Planter Box with Hearts (18x11x4)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 6.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "blue-ridge-dinnerware-id-values-book-9462f": {
       "title": "Blue Ridge Dinnerware ID & Values Book",
       "first_seen": "2026-04-04",
@@ -4325,14 +4317,6 @@
       "first_seen": "2026-04-04",
       "last_seen": "2026-04-04",
       "last_seen_price": 10.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
-    "braided-wicker-basket-with-handles-8x10x9-9322c": {
-      "title": "Braided Wicker Basket with Handles (8x10x9)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 16.0,
       "alerted": false,
       "gemini_category": "unknown"
     },
@@ -7728,14 +7712,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "framed-spirit-of-the-wild-bald-eagles-by-rosemary-millette-23x28-3a5d7": {
-      "title": "Framed \"Spirit Of The Wild Bald Eagles\" By Rosemary Millette (23x28)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 100.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "framed-the-distance-getting-closer-by-ea-wagner-096-print-15x18-b23f3": {
       "title": "Framed \"The Distance Getting Closer\" by E.a. Wagner 096 Print (15x18)",
       "first_seen": "2026-04-04",
@@ -10504,14 +10480,6 @@
       "alerted": false,
       "gemini_category": "unknown"
     },
-    "ibf-bunco-party-family-game-2x75x45-4683e": {
-      "title": "IBF Bunco Party Family Game (2x7.5x4.5)",
-      "first_seen": "2026-04-04",
-      "last_seen": "2026-04-04",
-      "last_seen_price": 5.0,
-      "alerted": false,
-      "gemini_category": "unknown"
-    },
     "ice-cream-table-29x30x30-w-4-chairs-07081": {
       "title": "Ice Cream Table (29x30x30) w/ 4 Chairs",
       "first_seen": "2026-04-04",
@@ -11137,7 +11105,7 @@
       "gemini_category": "unknown"
     }
   },
-  "last_run": "2026-04-04T14:08:18.293243-06:00",
-  "run_count": 6,
+  "last_run": "2026-04-04T18:42:24.026866-06:00",
+  "run_count": 7,
   "gemini_calls_today": 1400
 }
