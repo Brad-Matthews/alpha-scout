@@ -151,6 +151,10 @@
                 const registration = await navigator.serviceWorker.register(
                     '/alpha-scout/firebase-messaging-sw.js'
                 );
+
+                // Wait for service worker to be active
+                await navigator.serviceWorker.ready;
+
                 const token = await getToken(messaging, {
                     vapidKey: "BN47whEfqFMfXm1QJ7h9002i6V-bd1gapx4AGjcgw_ECLaEn5sXInQnmM5SbZVYkA5ebyqFr44uprXmBW8fyJrE",
                     serviceWorkerRegistration: registration
