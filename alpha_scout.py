@@ -11,7 +11,7 @@ import re
 import statistics
 import sys
 import time
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
@@ -44,7 +44,20 @@ EBAY_CLIENT_ID      = os.environ.get("EBAY_CLIENT_ID", "")
 EBAY_CLIENT_SECRET  = os.environ.get("EBAY_CLIENT_SECRET", "")
 EBAY_ENABLED        = bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
 
-# Dry-run mode — scrape + Gemini run normally, skip Etsy calls and Telegram sends
+# FCM (Firebase Cloud Messaging)
+LAUNCH_DATE_STR     = os.environ.get("LAUNCH_DATE", "2026-04-05")
+LAUNCH_DATE         = date.fromisoformat(LAUNCH_DATE_STR)
+FCM_SERVER_KEY      = os.environ.get("FCM_SERVER_KEY", "")
+FCM_DEVICE_TOKENS   = [
+    t for t in [
+        os.environ.get("FCM_DEVICE_TOKEN_1", ""),
+        os.environ.get("FCM_DEVICE_TOKEN_2", ""),
+    ] if t
+]
+FCM_ENABLED         = date.today() >= LAUNCH_DATE + timedelta(days=5)
+TELEGRAM_ENABLED    = not FCM_ENABLED
+
+# Dry-run mode — scrape + Gemini run normally, skip Etsy/Telegram/FCM sends
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 
 ESTATE_BASE_URL     = "https://mainstreetestatesales.com"
@@ -508,12 +521,60 @@ def build_heartbeat(stats: dict) -> str:
     return msg
 
 # ---------------------------------------------------------------------------
+# FCM (Firebase Cloud Messaging) helpers
+# ---------------------------------------------------------------------------
+
+def send_fcm(title: str, body: str, url: str) -> None:
+    """Send FCM push notification to all registered device tokens."""
+    if not FCM_SERVER_KEY or not FCM_DEVICE_TOKENS:
+        log.warning("FCM enabled but no server key or device tokens configured")
+        return
+    for token in FCM_DEVICE_TOKENS:
+        try:
+            resp = httpx.post(
+                "https://fcm.googleapis.com/fcm/send",
+                headers={
+                    "Authorization": f"key={FCM_SERVER_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "to": token,
+                    "notification": {
+                        "title": title,
+                        "body": body,
+                        "click_action": url,
+                    },
+                    "data": {"url": url},
+                },
+                timeout=15,
+            )
+            resp.raise_for_status()
+            log.info(f"FCM notification sent to token ...{token[-6:]}")
+        except Exception as e:
+            log.error(f"FCM send failed: {e}")
+
+
+def build_fcm_alert(item: dict, gemini_data: dict, market_est: float,
+                    gross_profit: float, roi: float, tier: str,
+                    is_price_drop: bool = False) -> tuple[str, str, str]:
+    """Returns (title, body, url) for FCM notification."""
+    drop_tag = " - Price Drop" if is_price_drop else ""
+    title = f"{tier} ALPHA{drop_tag}: {item['title'][:50]}"
+    body = (
+        f"Estate: ${item['price']:.0f} -> Est. Value: ${market_est:.0f} "
+        f"(~${gross_profit:.0f} profit, {roi:.1f}x ROI)"
+    )
+    url = f"{ESTATE_BASE_URL}/products/{item['handle']}"
+    return title, body, url
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
 async def send_telegram(bot: Bot, text: str) -> None:
-    if DRY_RUN:
-        log.info(f"[DRY RUN] Would send Telegram message ({len(text)} chars)")
+    if DRY_RUN or not TELEGRAM_ENABLED:
+        if DRY_RUN:
+            log.info(f"[DRY RUN] Would send Telegram message ({len(text)} chars)")
         return
     try:
         await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2,
@@ -524,15 +585,22 @@ async def send_telegram(bot: Bot, text: str) -> None:
 
 async def main() -> None:
     log.info("=== Alpha Scout starting ===")
+    log.info(f"Notification mode: {'FCM' if FCM_ENABLED else 'Telegram'} | Day {(date.today() - LAUNCH_DATE).days + 1} since launch")
 
     if DRY_RUN:
-        log.info("[DRY RUN] Dry-run mode enabled — skipping Etsy calls and Telegram sends")
+        log.info("[DRY RUN] Dry-run mode enabled — skipping Etsy calls, Telegram sends, and FCM sends")
 
     # -----------------------------------------------------------------------
-    # Startup validation (ENHANCEMENT 5)
+    # Startup validation
     # -----------------------------------------------------------------------
     if DRY_RUN:
         required = [("GEMINI_API_KEY", GEMINI_API_KEY)]
+    elif FCM_ENABLED:
+        required = [
+            ("GEMINI_API_KEY", GEMINI_API_KEY),
+            ("ETSY_API_KEY", ETSY_API_KEY),
+            ("FCM_SERVER_KEY", FCM_SERVER_KEY),
+        ]
     else:
         required = [
             ("GEMINI_API_KEY", GEMINI_API_KEY),
@@ -567,7 +635,7 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     # Configure Telegram
     # -----------------------------------------------------------------------
-    bot = Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = Bot(token=TELEGRAM_BOT_TOKEN) if TELEGRAM_BOT_TOKEN else None
 
     # -----------------------------------------------------------------------
     # Optional eBay token
@@ -582,7 +650,10 @@ async def main() -> None:
             products_raw = scrape_products(client)
         except Exception as e:
             log.error(f"Estate site unreachable: {e}")
-            await send_telegram(bot, escape_md2(f"❌ Alpha Scout FAILED — Estate site unreachable: {e}"))
+            if TELEGRAM_ENABLED and bot and not DRY_RUN:
+                await send_telegram(bot, escape_md2(f"❌ Alpha Scout FAILED — Estate site unreachable: {e}"))
+            if FCM_ENABLED and not DRY_RUN:
+                send_fcm("Alpha Scout FAILED", f"Estate site unreachable: {e}", "")
             return
 
         products = []
@@ -714,10 +785,16 @@ async def main() -> None:
                 if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
                     if DRY_RUN:
                         log.info(f"[DRY RUN] Would send alert: {tier} — {item['title']}")
+                        if FCM_ENABLED:
+                            log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
                     else:
-                        alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
-                                                        is_price_drop=item.get("is_price_drop", False))
-                        await send_telegram(bot, alert_msg)
+                        if TELEGRAM_ENABLED and bot:
+                            alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
+                                                            is_price_drop=is_price_drop)
+                            await send_telegram(bot, alert_msg)
+                        if FCM_ENABLED:
+                            fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
+                            send_fcm(fcm_title, fcm_body, fcm_url)
                         time.sleep(1)
                     stats["alerts_sent"] += 1
                     history["items"][handle] = {
@@ -789,10 +866,16 @@ async def main() -> None:
             if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
                 if DRY_RUN:
                     log.info(f"[DRY RUN] Would send alert: {tier} — {item['title']}")
+                    if FCM_ENABLED:
+                        log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
                 else:
-                    alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
-                                                    is_price_drop=item.get("is_price_drop", False))
-                    await send_telegram(bot, alert_msg)
+                    if TELEGRAM_ENABLED and bot:
+                        alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
+                                                        is_price_drop=is_price_drop)
+                        await send_telegram(bot, alert_msg)
+                    if FCM_ENABLED:
+                        fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
+                        send_fcm(fcm_title, fcm_body, fcm_url)
                     time.sleep(1)  # 1-second delay between messages
                 stats["alerts_sent"] += 1
                 history["items"][handle] = {
@@ -824,12 +907,22 @@ async def main() -> None:
     heartbeat = build_heartbeat(stats)
     if DRY_RUN:
         log.info(f"[DRY RUN] Heartbeat:\n{heartbeat}")
-    elif bot:
-        try:
-            await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=heartbeat,
-                                   parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-        except Exception as e:
-            log.error(f"Telegram heartbeat send failed: {e}")
+        if FCM_ENABLED:
+            log.info("[DRY RUN] Would send FCM heartbeat")
+    else:
+        if TELEGRAM_ENABLED and bot:
+            try:
+                await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=heartbeat,
+                                       parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+            except Exception as e:
+                log.error(f"Telegram heartbeat send failed: {e}")
+        if FCM_ENABLED:
+            days_since = (date.today() - LAUNCH_DATE).days + 1
+            send_fcm(
+                f"Alpha Scout - Run #{stats['run_count']}",
+                f"Scraped {stats['total_scraped']} | New: {stats['new_items']} | Alerts: {stats['alerts_sent']} | Day {days_since}",
+                "",
+            )
 
     # -----------------------------------------------------------------------
     # Save history
