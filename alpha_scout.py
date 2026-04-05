@@ -16,7 +16,8 @@ from urllib.parse import quote_plus
 from zoneinfo import ZoneInfo
 
 import httpx
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import PIL.Image
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -224,9 +225,10 @@ def build_gemini_prompt(title: str, price: float, converted: bool) -> str:
     return GEMINI_PROMPT_TEMPLATE.format(title=title, price=f"{price:.0f}", price_note=price_note)
 
 
-def call_gemini(model, prompt: str, image_url: str | None) -> dict | None:
-    """Send multimodal prompt to Gemini 1.5 Flash; return parsed JSON or None."""
+def call_gemini(client: genai.Client, prompt: str, image_url: str | None) -> dict | None:
+    """Send multimodal prompt to Gemini 2.0 Flash Lite; return parsed JSON or None."""
     try:
+        contents: list = []
         if image_url:
             try:
                 with httpx.Client(timeout=15) as img_client:
@@ -234,12 +236,17 @@ def call_gemini(model, prompt: str, image_url: str | None) -> dict | None:
                     img_resp.raise_for_status()
                     img_data = img_resp.content
                 img = PIL.Image.open(io.BytesIO(img_data))
-                response = model.generate_content([prompt, img])
+                contents = [prompt, img]
             except Exception as e:
                 log.warning(f"Image download failed — falling back to text-only: {e}")
-                response = model.generate_content(prompt)
+                contents = [prompt]
         else:
-            response = model.generate_content(prompt)
+            contents = [prompt]
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash-lite",
+            contents=contents,
+        )
 
         text = response.text.strip()
         # Strip markdown code fences if Gemini wraps them
@@ -629,8 +636,7 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     # Configure Gemini
     # -----------------------------------------------------------------------
-    genai.configure(api_key=GEMINI_API_KEY)
-    model = genai.GenerativeModel("gemini-1.5-flash")
+    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
     # -----------------------------------------------------------------------
     # Configure Telegram
@@ -736,7 +742,7 @@ async def main() -> None:
             # Stage 1 — Gemini
             # ---------------------------------------------------------------
             prompt = build_gemini_prompt(item["title"], item["price"], item["converted"])
-            gemini_data = call_gemini(model, prompt, item["image_url"])
+            gemini_data = call_gemini(gemini_client, prompt, item["image_url"])
             stats["gemini_calls"] += 1
             history["gemini_calls_today"] = stats["gemini_calls"]
             time.sleep(0.5)  # Respect Gemini 15 RPM rate limit

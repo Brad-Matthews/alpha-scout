@@ -1,4 +1,4 @@
 httpx
 python-telegram-bot[asyncio]
-google-generativeai
+google-genai
 Pillow
