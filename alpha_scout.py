@@ -248,7 +248,12 @@ def call_gemini(client: genai.Client, prompt: str, image_url: str | None) -> dic
             contents=contents,
         )
 
-        text = response.text.strip()
+        raw_text = response.text if hasattr(response, 'text') and response.text else ""
+        log.debug(f"Gemini raw response: {raw_text[:500]}")
+        text = raw_text.strip()
+        if not text:
+            log.error("Gemini returned empty response")
+            return None
         # Strip markdown code fences if Gemini wraps them
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -748,15 +753,16 @@ async def main() -> None:
             time.sleep(0.5)  # Respect Gemini 15 RPM rate limit
 
             if gemini_data is None:
-                # Parse / API failure — log and skip
+                # Parse / API failure — write to history so it's skipped on future runs
                 history["items"][handle] = {
                     "title": item["title"],
                     "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
                     "last_seen": today_str,
                     "last_seen_price": item["price"],
                     "alerted": False,
-                    "gemini_category": "unknown",
+                    "gemini_category": "error",
                 }
+                stats["gemini_failures"] = stats.get("gemini_failures", 0) + 1
                 continue
 
             confidence = gemini_data.get("confidence", 0)
@@ -902,6 +908,13 @@ async def main() -> None:
                     "alerted": False,
                     "gemini_category": category,
                 }
+
+    # -----------------------------------------------------------------------
+    # Gemini batch summary
+    # -----------------------------------------------------------------------
+    gemini_failures = stats.get("gemini_failures", 0)
+    gemini_successes = stats["gemini_calls"] - gemini_failures
+    log.info(f"Gemini batch: {gemini_successes} parsed OK, {gemini_failures} failed out of {stats['gemini_calls']} calls")
 
     # -----------------------------------------------------------------------
     # Heartbeat
