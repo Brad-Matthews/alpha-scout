@@ -24,14 +24,14 @@ from telegram.constants import ParseMode
 # ---------------------------------------------------------------------------
 # Budget Constants
 # ---------------------------------------------------------------------------
-DAILY_GEMINI_BUDGET = 1400   # Hard stop below 1,500 free limit
+DAILY_GEMINI_BUDGET = 900    # Hard stop below free tier limit
 DAILY_ETSY_BUDGET   = 500    # Defensive cap
 ALPHA_MIN_PROFIT    = 100    # Minimum gross profit in dollars
 ALPHA_MIN_ROI       = 1.5    # Minimum ROI multiplier
 CONFIDENCE_SKIP     = 0.50   # Below this: no alert, just log
 HISTORY_PRUNE_DAYS  = 90     # Remove unseen/unalerted items older than this
 HISTORY_PRUNE_ALERTED_DAYS = 365  # Remove alerted items older than 1 year
-GEMINI_MODEL        = "gemini-1.5-flash"
+GEMINI_MODEL        = "gemini-2.5-flash-lite"
 MAX_SCRAPE_PAGES    = 50     # Safety guard against infinite pagination
 
 # ---------------------------------------------------------------------------
