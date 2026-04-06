@@ -448,7 +448,8 @@ def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_e
     etsy_url = etsy_data.get("etsy_search_url", "")
 
     estate_url = f"{ESTATE_BASE_URL}/products/{item['handle']}"
-    google_url = f"https://google.com/search?q={quote_plus(item['title'] + ' sold price resale')}"
+    google_query = re.sub(r"\(.*?\)", "", item["title"]).strip()
+    google_url = f"https://google.com/search?q={quote_plus(google_query)}"
 
     title_esc = escape_html(item["title"])
     price_str = f"{item['price']:.0f}"
@@ -471,9 +472,10 @@ def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_e
 
     # For HIGH/MEDIUM include market value + profit lines
     if tier in ("HIGH", "MEDIUM"):
+        profit_pct = (gross_profit / item["price"] * 100) if item["price"] > 0 else 0
         value_lines = (
             f"\u2705 Est. Market Value: <b>${market_est:.0f}</b>\n"
-            f"\U0001f4c8 Potential Profit: <b>~${gross_profit:.0f}</b> ({roi:.1f}x ROI)"
+            f"\U0001f4c8 Potential Profit: <b>~${gross_profit:.0f}</b> (+{profit_pct:.0f}% profit)"
         )
     else:
         value_lines = ""
