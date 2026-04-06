@@ -31,6 +31,7 @@ ALPHA_MIN_PROFIT    = 100    # Minimum gross profit in dollars
 ALPHA_MIN_ROI       = 1.5    # Minimum ROI multiplier
 CONFIDENCE_SKIP     = 0.50   # Below this: no alert, just log
 HISTORY_PRUNE_DAYS  = 90     # Remove unseen/unalerted items older than this
+GEMINI_MODEL        = "gemini-1.5-flash"
 
 # ---------------------------------------------------------------------------
 # Environment / Secrets
@@ -226,7 +227,7 @@ def build_gemini_prompt(title: str, price: float, converted: bool) -> str:
 
 
 def call_gemini(client: genai.Client, prompt: str, image_url: str | None) -> dict | None:
-    """Send multimodal prompt to Gemini 2.0 Flash Lite; return parsed JSON or None."""
+    """Send multimodal prompt to Gemini; return parsed JSON or None."""
     try:
         contents: list = []
         if image_url:
@@ -244,7 +245,7 @@ def call_gemini(client: genai.Client, prompt: str, image_url: str | None) -> dic
             contents = [prompt]
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash-lite",
+            model=GEMINI_MODEL,
             contents=contents,
         )
 
@@ -522,7 +523,8 @@ def build_heartbeat(stats: dict) -> str:
         f"\U0001f504 Re-evaluated (price drop): <b>{s['price_drops']}</b>\n"
         f"\u2705 Alerts sent: <b>{s['alerts_sent']}</b>\n"
         f"\u274c Below threshold: <b>{s['below_threshold']}</b>\n"
-        f"\U0001f916 Gemini calls used: <b>{s['gemini_calls']} / {DAILY_GEMINI_BUDGET}</b> daily budget\n\n"
+        f"\U0001f916 Gemini calls used: <b>{s['gemini_calls']} / {DAILY_GEMINI_BUDGET}</b> daily budget\n"
+        f"\U0001f9e0 Model: <b>{escape_html(GEMINI_MODEL)}</b>\n\n"
     )
     if s.get("cold_start_remaining", 0) > 0:
         remaining = s['cold_start_remaining']
