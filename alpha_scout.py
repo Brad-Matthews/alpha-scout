@@ -17,7 +17,6 @@ from zoneinfo import ZoneInfo
 
 import httpx
 from google import genai
-from google.genai import types
 import PIL.Image
 from telegram import Bot
 from telegram.constants import ParseMode
@@ -31,7 +30,9 @@ ALPHA_MIN_PROFIT    = 100    # Minimum gross profit in dollars
 ALPHA_MIN_ROI       = 1.5    # Minimum ROI multiplier
 CONFIDENCE_SKIP     = 0.50   # Below this: no alert, just log
 HISTORY_PRUNE_DAYS  = 90     # Remove unseen/unalerted items older than this
+HISTORY_PRUNE_ALERTED_DAYS = 365  # Remove alerted items older than 1 year
 GEMINI_MODEL        = "gemini-1.5-flash"
+MAX_SCRAPE_PAGES    = 50     # Safety guard against infinite pagination
 
 # ---------------------------------------------------------------------------
 # Environment / Secrets
@@ -47,13 +48,16 @@ EBAY_CLIENT_SECRET  = os.environ.get("EBAY_CLIENT_SECRET", "")
 EBAY_ENABLED        = bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
 
 # FCM (Firebase Cloud Messaging)
+# NOTE: FCM Legacy HTTP API (fcm.googleapis.com/fcm/send) is deprecated by Google.
+# Migrate to FCM v1 API (fcm.googleapis.com/v1/projects/{id}/messages:send with OAuth2)
+# when Google announces a sunset date. Legacy API still works as of April 2026.
 LAUNCH_DATE_STR     = os.environ.get("LAUNCH_DATE", "2026-04-05")
 LAUNCH_DATE         = date.fromisoformat(LAUNCH_DATE_STR)
 FCM_SERVER_KEY      = os.environ.get("FCM_SERVER_KEY", "")
 FCM_DEVICE_TOKENS   = [
     t for t in [
-        os.environ.get("FCM_DEVICE_TOKEN_1", ""),
-        os.environ.get("FCM_DEVICE_TOKEN_2", ""),
+        os.environ.get(f"FCM_DEVICE_TOKEN_{i}", "")
+        for i in range(1, 6)  # Supports up to 5 devices — just add secrets
     ] if t
 ]
 FCM_ENABLED         = date.today() >= LAUNCH_DATE + timedelta(days=5)
@@ -65,6 +69,7 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 ESTATE_BASE_URL     = "https://mainstreetestatesales.com"
 PRODUCTS_JSON_URL   = f"{ESTATE_BASE_URL}/collections/all/products.json"
 HISTORY_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+ACTIONS_URL         = "https://github.com/Brad-Matthews/alpha-scout/actions"
 
 DENVER_TZ = ZoneInfo("America/Denver")
 
@@ -119,12 +124,10 @@ def reset_daily_gemini_counter(history: dict) -> dict:
 
 
 def prune_old_history(history: dict) -> int:
-    """Remove items from history that are unalerted and unseen for >HISTORY_PRUNE_DAYS days."""
+    """Remove items from history that are stale: unalerted >90 days, or alerted >365 days."""
     today = date.today()
     to_remove = []
     for handle, entry in history["items"].items():
-        if entry.get("alerted", False):
-            continue
         last_seen = entry.get("last_seen")
         if not last_seen:
             continue
@@ -132,8 +135,13 @@ def prune_old_history(history: dict) -> int:
             last_seen_date = date.fromisoformat(last_seen)
         except (ValueError, TypeError):
             continue
-        if (today - last_seen_date).days > HISTORY_PRUNE_DAYS:
-            to_remove.append(handle)
+        age_days = (today - last_seen_date).days
+        if entry.get("alerted", False):
+            if age_days > HISTORY_PRUNE_ALERTED_DAYS:
+                to_remove.append(handle)
+        else:
+            if age_days > HISTORY_PRUNE_DAYS:
+                to_remove.append(handle)
     for handle in to_remove:
         del history["items"][handle]
     return len(to_remove)
@@ -153,13 +161,16 @@ def scrape_products(client: httpx.Client) -> list[dict]:
     """Paginate the Shopify JSON API and return all available products."""
     all_products = []
     page = 1
-    while True:
+    while page <= MAX_SCRAPE_PAGES:
         log.info(f"Scraping page {page} ...")
         products = retry(_scrape_page, client, page, label=f"Shopify page {page}")
         if not products:
             break
         all_products.extend(products)
         page += 1
+        time.sleep(0.5)  # Polite scraping delay between pages
+    if page > MAX_SCRAPE_PAGES:
+        log.warning(f"Hit max page limit ({MAX_SCRAPE_PAGES}). Possible pagination issue.")
     log.info(f"Scraped {len(all_products)} total products")
     return all_products
 
@@ -226,17 +237,29 @@ def build_gemini_prompt(title: str, price: float, converted: bool) -> str:
     return GEMINI_PROMPT_TEMPLATE.format(title=title, price=f"{price:.0f}", price_note=price_note)
 
 
-def call_gemini(client: genai.Client, prompt: str, image_url: str | None) -> dict | None:
+def _gemini_generate(gemini_client: genai.Client, contents: list) -> str:
+    """Single Gemini API call (retryable unit). Returns raw text."""
+    response = gemini_client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=contents,
+    )
+    try:
+        raw_text = response.text or ""
+    except (ValueError, AttributeError):
+        raw_text = ""
+    return raw_text
+
+
+def call_gemini(gemini_client: genai.Client, http_client: httpx.Client,
+                prompt: str, image_url: str | None) -> dict | None:
     """Send multimodal prompt to Gemini; return parsed JSON or None."""
     try:
         contents: list = []
         if image_url:
             try:
-                with httpx.Client(timeout=15) as img_client:
-                    img_resp = img_client.get(image_url)
-                    img_resp.raise_for_status()
-                    img_data = img_resp.content
-                img = PIL.Image.open(io.BytesIO(img_data))
+                img_resp = http_client.get(image_url, timeout=15)
+                img_resp.raise_for_status()
+                img = PIL.Image.open(io.BytesIO(img_resp.content))
                 contents = [prompt, img]
             except Exception as e:
                 log.warning(f"Image download failed — falling back to text-only: {e}")
@@ -244,12 +267,8 @@ def call_gemini(client: genai.Client, prompt: str, image_url: str | None) -> dic
         else:
             contents = [prompt]
 
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-        )
-
-        raw_text = response.text if hasattr(response, 'text') and response.text else ""
+        raw_text = retry(_gemini_generate, gemini_client, contents,
+                         attempts=3, delay=5.0, label="Gemini API")
         log.debug(f"Gemini raw response: {raw_text[:500]}")
         text = raw_text.strip()
         if not text:
@@ -382,7 +401,6 @@ def compute_market_estimate(gemini_data: dict, etsy_data: dict, ebay_data: dict 
     if EBAY_ENABLED and ebay_data and ebay_data.get("ebay_listing_count", 0) >= 3:
         ebay_median = ebay_data.get("ebay_median_ask", 0)
         if etsy_count >= 3:
-            # 60% Gemini + 20% Etsy + 20% eBay
             return (gemini_midpoint * 0.60) + (etsy_median * 0.20) + (ebay_median * 0.20)
         else:
             return (gemini_midpoint * 0.60) + (ebay_median * 0.40)
@@ -406,24 +424,24 @@ def confidence_tier(confidence: float, etsy_count: int) -> str:
     return "SKIP"
 
 # ---------------------------------------------------------------------------
-# Telegram helpers
+# Telegram helpers — alerts use HTML (not MarkdownV2) to avoid escaping issues
 # ---------------------------------------------------------------------------
 
-def escape_md2(text: str) -> str:
-    """Escape MarkdownV2 special characters."""
-    special = r"_*[]()~`>#+-=|{}.!"
-    return re.sub(f"([{re.escape(special)}])", r"\\\1", str(text))
+def escape_html(text: str) -> str:
+    """Escape HTML special characters for Telegram HTML parse mode."""
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_est: float,
                         gross_profit: float, roi: float, tier: str,
                         is_price_drop: bool = False) -> str:
+    """Build alert message as HTML for Telegram."""
     conf_pct = int(gemini_data["confidence"] * 100)
     low = gemini_data["estimated_resale_low"]
     high = gemini_data["estimated_resale_high"]
-    key_signals = gemini_data.get("key_signals", "")
-    category = gemini_data.get("category", "other")
-    best_platform = gemini_data.get("best_platform", "either")
+    key_signals = escape_html(gemini_data.get("key_signals", ""))
+    category = escape_html(gemini_data.get("category", "other").capitalize())
+    best_platform = escape_html(gemini_data.get("best_platform", "either").capitalize())
 
     etsy_count = etsy_data.get("etsy_listing_count", 0)
     etsy_median = etsy_data.get("etsy_median_ask", 0)
@@ -432,79 +450,54 @@ def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_e
     estate_url = f"{ESTATE_BASE_URL}/products/{item['handle']}"
     google_url = f"https://google.com/search?q={quote_plus(item['title'] + ' sold price resale')}"
 
-    # Pre-compute all formatted strings to avoid nested f-string quote issues (BUG 1)
-    title_esc = escape_md2(item["title"])
-    signals_esc = escape_md2(key_signals)
-    price_str = escape_md2(f"{item['price']:.0f}")
-    low_str = escape_md2(str(low))
-    high_str = escape_md2(str(high))
-    conf_str = escape_md2(str(conf_pct))
-    category_str = escape_md2(category.capitalize())
-    platform_str = escape_md2(best_platform.capitalize())
-    market_est_str = escape_md2(f"{market_est:.0f}")
-    profit_str = escape_md2(f"{gross_profit:.0f}")
-    roi_str = escape_md2(f"{roi:.1f}")
-    etsy_median_str = escape_md2(f"{etsy_median:.0f}")
-    etsy_count_str = escape_md2(str(etsy_count))
+    title_esc = escape_html(item["title"])
+    price_str = f"{item['price']:.0f}"
 
-    # Escape link label text to prevent MarkdownV2 breakage on titles with ) etc. (BUG 4)
-    estate_label = escape_md2("\U0001f517 View Estate Listing")
-    etsy_label = escape_md2("\U0001f6cd Search Etsy")
-    google_label = escape_md2("\U0001f50d Google This")
-
-    drop_suffix = " \u2014 Price Drop" if is_price_drop else ""
+    drop_suffix = " - Price Drop" if is_price_drop else ""
     if tier == "HIGH":
-        emoji = "\U0001f7e2"  # green circle
-        header = f"{emoji} HIGH CONFIDENCE ALPHA{drop_suffix}"
+        header = f"\U0001f7e2 HIGH CONFIDENCE ALPHA{drop_suffix}"
     elif tier == "MEDIUM":
-        emoji = "\U0001f7e1"  # yellow circle
-        header = f"{emoji} MEDIUM CONFIDENCE ALPHA{drop_suffix}"
+        header = f"\U0001f7e1 MEDIUM CONFIDENCE ALPHA{drop_suffix}"
     else:
-        emoji = "\U0001f534"  # red circle
-        header = f"{emoji} SPECULATIVE \u2014 Verify before buying{drop_suffix}"
+        header = f"\U0001f534 SPECULATIVE - Verify before buying{drop_suffix}"
 
     # Etsy market line
     if etsy_count >= 3:
-        etsy_line = f"\U0001f6cd Etsy Active Market: *${etsy_median_str} median* \\({etsy_count_str} listings\\)"
+        etsy_line = f"\U0001f6cd Etsy Active Market: <b>${etsy_median:.0f} median</b> ({etsy_count} listings)"
     elif etsy_count > 0:
-        etsy_line = f"\U0001f6cd Etsy Active Market: *thin* \\({etsy_count_str} listings found\\)"
+        etsy_line = f"\U0001f6cd Etsy Active Market: <b>thin</b> ({etsy_count} listings found)"
     else:
-        etsy_line = "\U0001f6cd Etsy Active Market: *thin* \\(0 listings found\\)"
+        etsy_line = "\U0001f6cd Etsy Active Market: <b>thin</b> (0 listings found)"
 
     # For HIGH/MEDIUM include market value + profit lines
     if tier in ("HIGH", "MEDIUM"):
         value_lines = (
-            f"\u2705 Est\\. Market Value: *${market_est_str}*\n"
-            f"\U0001f4c8 Potential Profit: *~${profit_str}* \\({roi_str}x ROI\\)"
+            f"\u2705 Est. Market Value: <b>${market_est:.0f}</b>\n"
+            f"\U0001f4c8 Potential Profit: <b>~${gross_profit:.0f}</b> ({roi:.1f}x ROI)"
         )
     else:
         value_lines = ""
 
-    price_drop_line = "\U0001f53d Price Drop \u2014 previously listed at a higher price\n" if is_price_drop else ""
+    price_drop_line = "\U0001f53d Price Drop - previously listed at a higher price\n" if is_price_drop else ""
 
     msg = (
         f"{header}\n\n"
-        f"*{title_esc}*\n\n"
-        f"\U0001f4b0 Estate Price: *${price_str}*\n"
+        f"<b>{title_esc}</b>\n\n"
+        f"\U0001f4b0 Estate Price: <b>${price_str}</b>\n"
         f"{price_drop_line}"
-        f"\U0001f4ca Gemini Estimate: *${low_str} \u2013 ${high_str}* \\| Confidence: {conf_str}%\n"
+        f"\U0001f4ca Gemini Estimate: <b>${low} - ${high}</b> | Confidence: {conf_pct}%\n"
         f"{etsy_line}\n"
     )
     if value_lines:
         msg += f"{value_lines}\n"
     msg += (
-        f"\n\U0001f916 _{signals_esc}_\n\n"
-        f"\U0001f4e6 {category_str} \\| Best platform: {platform_str} \\| Confidence: {conf_str}%\n\n"
-        f"[{estate_label}]({estate_url})  "
-        f"[{etsy_label}]({etsy_url})  "
-        f"[{google_label}]({google_url})"
+        f"\n\U0001f916 <i>{key_signals}</i>\n\n"
+        f"\U0001f4e6 {category} | Best platform: {best_platform} | Confidence: {conf_pct}%\n\n"
+        f'<a href="{estate_url}">\U0001f517 View Estate Listing</a>  '
+        f'<a href="{etsy_url}">\U0001f6cd Search Etsy</a>  '
+        f'<a href="{google_url}">\U0001f50d Google This</a>'
     )
     return msg
-
-
-def escape_html(text: str) -> str:
-    """Escape HTML special characters for Telegram HTML parse mode."""
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 def build_heartbeat(stats: dict) -> str:
@@ -539,7 +532,8 @@ def build_heartbeat(stats: dict) -> str:
 # ---------------------------------------------------------------------------
 
 def send_fcm(title: str, body: str, url: str) -> None:
-    """Send FCM push notification to all registered device tokens."""
+    """Send FCM push notification to all registered device tokens.
+    NOTE: Uses deprecated FCM Legacy HTTP API. Migrate to FCM v1 API when convenient."""
     if not FCM_SERVER_KEY or not FCM_DEVICE_TOKENS:
         log.warning("FCM enabled but no server key or device tokens configured")
         return
@@ -586,12 +580,13 @@ def build_fcm_alert(item: dict, gemini_data: dict, market_est: float,
 # ---------------------------------------------------------------------------
 
 async def send_telegram(bot: Bot, text: str) -> None:
+    """Send a message via Telegram using HTML parse mode."""
     if DRY_RUN or not TELEGRAM_ENABLED:
         if DRY_RUN:
             log.info(f"[DRY RUN] Would send Telegram message ({len(text)} chars)")
         return
     try:
-        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.MARKDOWN_V2,
+        await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode=ParseMode.HTML,
                                disable_web_page_preview=True)
     except Exception as e:
         log.error(f"Telegram send failed: {e}")
@@ -634,11 +629,11 @@ async def main() -> None:
     history = reset_daily_gemini_counter(history)
 
     # -----------------------------------------------------------------------
-    # Prune old unseen items (ENHANCEMENT 4)
+    # Prune old unseen items
     # -----------------------------------------------------------------------
     pruned = prune_old_history(history)
     if pruned:
-        log.info(f"Pruned {pruned} old unseen items from history")
+        log.info(f"Pruned {pruned} old items from history")
 
     # -----------------------------------------------------------------------
     # Configure Gemini
@@ -664,9 +659,9 @@ async def main() -> None:
         except Exception as e:
             log.error(f"Estate site unreachable: {e}")
             if TELEGRAM_ENABLED and bot and not DRY_RUN:
-                await send_telegram(bot, escape_md2(f"❌ Alpha Scout FAILED — Estate site unreachable: {e}"))
+                await send_telegram(bot, f"\u274c Alpha Scout FAILED - Estate site unreachable: {escape_html(str(e))}")
             if FCM_ENABLED and not DRY_RUN:
-                send_fcm("Alpha Scout FAILED", f"Estate site unreachable: {e}", "")
+                send_fcm("Alpha Scout FAILED", f"Estate site unreachable: {e}", ACTIONS_URL)
             return
 
         products = []
@@ -684,11 +679,15 @@ async def main() -> None:
         current_handles = {p["handle"] for p in products}
 
         # Remove items from history that are no longer on site
-        stale = [h for h in history["items"] if h not in current_handles]
-        for h in stale:
-            del history["items"][h]
-        if stale:
-            log.info(f"Removed {len(stale)} stale items from history")
+        # Guard: skip stale removal if scrape returned suspiciously few items
+        if len(products) >= 100:
+            stale = [h for h in history["items"] if h not in current_handles]
+            for h in stale:
+                del history["items"][h]
+            if stale:
+                log.info(f"Removed {len(stale)} stale items from history")
+        elif len(products) > 0:
+            log.warning(f"Only {len(products)} products scraped (expected 4000+). Skipping stale item removal to protect history.")
 
         stats = {
             "total_scraped": len(products),
@@ -698,6 +697,8 @@ async def main() -> None:
             "alerts_sent": 0,
             "below_threshold": 0,
             "gemini_calls": history["gemini_calls_today"],
+            "gemini_calls_this_run": 0,
+            "gemini_failures": 0,
             "cold_start_remaining": 0,
         }
 
@@ -708,16 +709,24 @@ async def main() -> None:
             handle = item["handle"]
             if handle in history["items"]:
                 hist_entry = history["items"][handle]
-                if hist_entry.get("last_seen_price") == item["price"]:
+                old_price = hist_entry.get("last_seen_price", 0)
+                new_price = item["price"]
+                if old_price == new_price:
                     # Same price — skip
                     hist_entry["last_seen"] = today_str
                     stats["skipped"] += 1
                     continue
-                else:
-                    # Price dropped — re-evaluate
+                elif new_price < old_price:
+                    # Price DECREASED — re-evaluate
                     stats["price_drops"] += 1
                     item["is_price_drop"] = True
                     items_to_process.append(item)
+                else:
+                    # Price INCREASED — update silently, no re-evaluation
+                    hist_entry["last_seen"] = today_str
+                    hist_entry["last_seen_price"] = new_price
+                    stats["skipped"] += 1
+                    continue
             else:
                 stats["new_items"] += 1
                 items_to_process.append(item)
@@ -732,69 +741,152 @@ async def main() -> None:
         if EBAY_ENABLED:
             ebay_token = get_ebay_token(client)
 
-        for item in items_to_process:
-            # Check Gemini budget
-            if stats["gemini_calls"] >= DAILY_GEMINI_BUDGET:
-                remaining = len(items_to_process) - items_to_process.index(item)
-                stats["cold_start_remaining"] = remaining
-                est_days = (remaining // DAILY_GEMINI_BUDGET) + 1
-                stats["cold_start_days"] = est_days
-                log.warning(f"Gemini daily budget hit. {remaining} items queued for tomorrow.")
-                budget_hit = True
-                break
+        try:
+            for item in items_to_process:
+                # Check Gemini budget
+                if stats["gemini_calls"] >= DAILY_GEMINI_BUDGET:
+                    remaining = len(items_to_process) - items_to_process.index(item)
+                    stats["cold_start_remaining"] = remaining
+                    est_days = (remaining // DAILY_GEMINI_BUDGET) + 1
+                    stats["cold_start_days"] = est_days
+                    log.warning(f"Gemini daily budget hit. {remaining} items queued for tomorrow.")
+                    budget_hit = True
+                    break
 
-            handle = item["handle"]
+                handle = item["handle"]
+                is_price_drop = item.get("is_price_drop", False)
 
-            # ---------------------------------------------------------------
-            # Stage 1 — Gemini
-            # ---------------------------------------------------------------
-            prompt = build_gemini_prompt(item["title"], item["price"], item["converted"])
-            gemini_data = call_gemini(gemini_client, prompt, item["image_url"])
-            stats["gemini_calls"] += 1
-            history["gemini_calls_today"] = stats["gemini_calls"]
-            time.sleep(0.5)  # Respect Gemini 15 RPM rate limit
+                # ---------------------------------------------------------------
+                # Stage 1 — Gemini
+                # ---------------------------------------------------------------
+                prompt = build_gemini_prompt(item["title"], item["price"], item["converted"])
+                gemini_data = call_gemini(gemini_client, client, prompt, item["image_url"])
+                stats["gemini_calls"] += 1
+                stats["gemini_calls_this_run"] += 1
+                history["gemini_calls_today"] = stats["gemini_calls"]
+                time.sleep(4.0)  # Respect Gemini 15 RPM free tier limit
 
-            if gemini_data is None:
-                # Parse / API failure — write to history so it's skipped on future runs
-                history["items"][handle] = {
-                    "title": item["title"],
-                    "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
-                    "last_seen": today_str,
-                    "last_seen_price": item["price"],
-                    "alerted": False,
-                    "gemini_category": "error",
-                }
-                stats["gemini_failures"] = stats.get("gemini_failures", 0) + 1
-                continue
+                if gemini_data is None:
+                    # Parse / API failure — write to history so it's skipped on future runs
+                    history["items"][handle] = {
+                        "title": item["title"],
+                        "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
+                        "last_seen": today_str,
+                        "last_seen_price": item["price"],
+                        "alerted": False,
+                        "gemini_category": "error",
+                    }
+                    stats["gemini_failures"] += 1
+                    continue
 
-            confidence = gemini_data.get("confidence", 0)
-            alpha_signal = gemini_data.get("alpha_signal", "NO").upper()
-            category = gemini_data.get("category", "other")
+                confidence = gemini_data.get("confidence", 0)
+                alpha_signal = gemini_data.get("alpha_signal", "NO").upper()
+                category = gemini_data.get("category", "other")
 
-            # Below skip threshold — add to history, no alert
-            if confidence < CONFIDENCE_SKIP or alpha_signal != "YES":
-                history["items"][handle] = {
-                    "title": item["title"],
-                    "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
-                    "last_seen": today_str,
-                    "last_seen_price": item["price"],
-                    "alerted": False,
-                    "gemini_category": category,
-                }
-                stats["below_threshold"] += 1
-                continue
+                # Below skip threshold — add to history, no alert
+                if confidence < CONFIDENCE_SKIP or alpha_signal != "YES":
+                    history["items"][handle] = {
+                        "title": item["title"],
+                        "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
+                        "last_seen": today_str,
+                        "last_seen_price": item["price"],
+                        "alerted": False,
+                        "gemini_category": category,
+                    }
+                    stats["below_threshold"] += 1
+                    continue
 
-            # Gate: must be YES + confidence >= 0.65 to proceed to Stage 2
-            if confidence < 0.65:
-                # Between 0.50 and 0.65 — still below the Etsy gate but above skip
-                # These are SPECULATIVE tier
-                etsy_data = {"etsy_median_ask": 0, "etsy_listing_count": 0, "etsy_search_url": f"https://www.etsy.com/search?q={quote_plus(clean_title_for_etsy(item['title']))}"}
+                # Gate: must be YES + confidence >= 0.65 to proceed to Stage 2
+                if confidence < 0.65:
+                    # Between 0.50 and 0.65 — SPECULATIVE tier, skip Etsy
+                    etsy_data = {"etsy_median_ask": 0, "etsy_listing_count": 0, "etsy_search_url": f"https://www.etsy.com/search?q={quote_plus(clean_title_for_etsy(item['title']))}"}
+                    ebay_data = None
+                    market_est = compute_market_estimate(gemini_data, etsy_data, ebay_data)
+                    gross_profit = market_est - item["price"]
+                    roi = market_est / item["price"] if item["price"] > 0 else 0
+
+                    tier = confidence_tier(confidence, etsy_data["etsy_listing_count"])
+
+                    if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
+                        if DRY_RUN:
+                            log.info(f"[DRY RUN] Would send alert: {tier} — {item['title']}")
+                            if FCM_ENABLED:
+                                log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
+                        else:
+                            if TELEGRAM_ENABLED and bot:
+                                alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
+                                                                is_price_drop=is_price_drop)
+                                await send_telegram(bot, alert_msg)
+                            if FCM_ENABLED:
+                                fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
+                                send_fcm(fcm_title, fcm_body, fcm_url)
+                            time.sleep(1)
+                        stats["alerts_sent"] += 1
+                        history["items"][handle] = {
+                            "title": item["title"],
+                            "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
+                            "last_seen": today_str,
+                            "last_seen_price": item["price"],
+                            "alerted": True,
+                            "gemini_category": category,
+                        }
+                    else:
+                        stats["below_threshold"] += 1
+                        history["items"][handle] = {
+                            "title": item["title"],
+                            "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
+                            "last_seen": today_str,
+                            "last_seen_price": item["price"],
+                            "alerted": False,
+                            "gemini_category": category,
+                        }
+                    continue
+
+                # ---------------------------------------------------------------
+                # Stage 2 — Etsy (and optionally eBay)
+                # ---------------------------------------------------------------
+                if DRY_RUN:
+                    etsy_data = {"etsy_median_ask": 0, "etsy_listing_count": 0,
+                                 "etsy_search_url": f"https://www.etsy.com/search?q={quote_plus(clean_title_for_etsy(item['title']))}"}
+                elif etsy_calls_today < DAILY_ETSY_BUDGET:
+                    etsy_data = query_etsy(client, item["title"])
+                    etsy_calls_today += 1
+                else:
+                    etsy_data = {"etsy_median_ask": 0, "etsy_listing_count": 0,
+                                 "etsy_search_url": f"https://www.etsy.com/search?q={quote_plus(clean_title_for_etsy(item['title']))}",
+                                 "error": True}
+                    log.warning("Etsy daily budget hit")
+
                 ebay_data = None
+                if EBAY_ENABLED and ebay_token:
+                    ebay_data = query_ebay(client, ebay_token, item["title"])
+
+                # ---------------------------------------------------------------
+                # Profit calculation
+                # ---------------------------------------------------------------
                 market_est = compute_market_estimate(gemini_data, etsy_data, ebay_data)
                 gross_profit = market_est - item["price"]
                 roi = market_est / item["price"] if item["price"] > 0 else 0
 
-                tier = confidence_tier(confidence, etsy_data["etsy_listing_count"])
+                etsy_count = etsy_data.get("etsy_listing_count", 0)
+
+                # Thin market override: still alert if Gemini confidence >= 0.80
+                if etsy_count == 0 and confidence < 0.80:
+                    stats["below_threshold"] += 1
+                    history["items"][handle] = {
+                        "title": item["title"],
+                        "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
+                        "last_seen": today_str,
+                        "last_seen_price": item["price"],
+                        "alerted": False,
+                        "gemini_category": category,
+                    }
+                    continue
+
+                # ---------------------------------------------------------------
+                # Stage 3 — Alert or skip
+                # ---------------------------------------------------------------
+                tier = confidence_tier(confidence, etsy_count)
 
                 if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
                     if DRY_RUN:
@@ -809,7 +901,7 @@ async def main() -> None:
                         if FCM_ENABLED:
                             fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
                             send_fcm(fcm_title, fcm_body, fcm_url)
-                        time.sleep(1)
+                        time.sleep(1)  # 1-second delay between messages
                     stats["alerts_sent"] += 1
                     history["items"][handle] = {
                         "title": item["title"],
@@ -829,94 +921,18 @@ async def main() -> None:
                         "alerted": False,
                         "gemini_category": category,
                     }
-                continue
-
-            # ---------------------------------------------------------------
-            # Stage 2 — Etsy (and optionally eBay)
-            # ---------------------------------------------------------------
-            if DRY_RUN:
-                etsy_data = {"etsy_median_ask": 0, "etsy_listing_count": 0,
-                             "etsy_search_url": f"https://www.etsy.com/search?q={quote_plus(clean_title_for_etsy(item['title']))}"}
-            elif etsy_calls_today < DAILY_ETSY_BUDGET:
-                etsy_data = query_etsy(client, item["title"])
-                etsy_calls_today += 1
-            else:
-                etsy_data = {"etsy_median_ask": 0, "etsy_listing_count": 0,
-                             "etsy_search_url": f"https://www.etsy.com/search?q={quote_plus(clean_title_for_etsy(item['title']))}",
-                             "error": True}
-                log.warning("Etsy daily budget hit")
-
-            ebay_data = None
-            if EBAY_ENABLED and ebay_token:
-                ebay_data = query_ebay(client, ebay_token, item["title"])
-
-            # ---------------------------------------------------------------
-            # Profit calculation
-            # ---------------------------------------------------------------
-            market_est = compute_market_estimate(gemini_data, etsy_data, ebay_data)
-            gross_profit = market_est - item["price"]
-            roi = market_est / item["price"] if item["price"] > 0 else 0
-
-            etsy_count = etsy_data.get("etsy_listing_count", 0)
-
-            # Thin market override: still alert if Gemini confidence >= 0.80
-            if etsy_count == 0 and confidence < 0.80:
-                stats["below_threshold"] += 1
-                history["items"][handle] = {
-                    "title": item["title"],
-                    "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
-                    "last_seen": today_str,
-                    "last_seen_price": item["price"],
-                    "alerted": False,
-                    "gemini_category": category,
-                }
-                continue
-
-            # ---------------------------------------------------------------
-            # Stage 3 — Alert or skip
-            # ---------------------------------------------------------------
-            tier = confidence_tier(confidence, etsy_count)
-
-            if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
-                if DRY_RUN:
-                    log.info(f"[DRY RUN] Would send alert: {tier} — {item['title']}")
-                    if FCM_ENABLED:
-                        log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
-                else:
-                    if TELEGRAM_ENABLED and bot:
-                        alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
-                                                        is_price_drop=is_price_drop)
-                        await send_telegram(bot, alert_msg)
-                    if FCM_ENABLED:
-                        fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
-                        send_fcm(fcm_title, fcm_body, fcm_url)
-                    time.sleep(1)  # 1-second delay between messages
-                stats["alerts_sent"] += 1
-                history["items"][handle] = {
-                    "title": item["title"],
-                    "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
-                    "last_seen": today_str,
-                    "last_seen_price": item["price"],
-                    "alerted": True,
-                    "gemini_category": category,
-                }
-            else:
-                stats["below_threshold"] += 1
-                history["items"][handle] = {
-                    "title": item["title"],
-                    "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
-                    "last_seen": today_str,
-                    "last_seen_price": item["price"],
-                    "alerted": False,
-                    "gemini_category": category,
-                }
+        finally:
+            # Always save history even if processing loop crashes
+            save_history(history)
+            log.info("History saved (in-loop or post-loop)")
 
     # -----------------------------------------------------------------------
-    # Gemini batch summary
+    # Gemini batch summary (per-run stats, not cumulative)
     # -----------------------------------------------------------------------
-    gemini_failures = stats.get("gemini_failures", 0)
-    gemini_successes = stats["gemini_calls"] - gemini_failures
-    log.info(f"Gemini batch: {gemini_successes} parsed OK, {gemini_failures} failed out of {stats['gemini_calls']} calls")
+    calls_this_run = stats["gemini_calls_this_run"]
+    failures_this_run = stats["gemini_failures"]
+    successes_this_run = calls_this_run - failures_this_run
+    log.info(f"Gemini batch: {successes_this_run} parsed OK, {failures_this_run} failed out of {calls_this_run} calls this run")
 
     # -----------------------------------------------------------------------
     # Heartbeat
@@ -942,14 +958,14 @@ async def main() -> None:
             send_fcm(
                 f"Alpha Scout - Run #{stats['run_count']}",
                 f"Scraped {stats['total_scraped']} | New: {stats['new_items']} | Alerts: {stats['alerts_sent']} | Day {days_since}",
-                "",
+                ACTIONS_URL,
             )
 
     # -----------------------------------------------------------------------
-    # Save history
+    # Final save (heartbeat updated run_count/last_run)
     # -----------------------------------------------------------------------
     save_history(history)
-    log.info(f"=== Alpha Scout complete. Alerts: {stats['alerts_sent']}, Gemini calls: {stats['gemini_calls']} ===")
+    log.info(f"=== Alpha Scout complete. Alerts: {stats['alerts_sent']}, Gemini calls this run: {calls_this_run} ===")
 
 
 if __name__ == "__main__":

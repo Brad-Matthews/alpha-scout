@@ -10,9 +10,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/setup-python@v5
         with:
@@ -36,20 +33,38 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git stash
+          git stash --include-untracked || true
           git pull --rebase origin main
-          git stash pop
+          git stash pop || true
           git add history.json
           git diff --staged --quiet || git commit -m "Update history.json after daily scan"
           git push origin main
 
-      - name: Alert on failure
+      - name: Alert on failure (Telegram)
         if: failure()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            -d chat_id="${TELEGRAM_CHAT_ID}" \
-            -d text="❌ Alpha Scout FAILED — Check: https://github.com/${{ github.repository }}/actions" \
-            -d parse_mode="HTML"
+          if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="❌ Alpha Scout FAILED — Check: https://github.com/${{ github.repository }}/actions" \
+              -d parse_mode="HTML"
+          fi
+
+      - name: Alert on failure (FCM)
+        if: failure()
+        env:
+          FCM_SERVER_KEY: ${{ secrets.FCM_SERVER_KEY }}
+          FCM_DEVICE_TOKEN_1: ${{ secrets.FCM_DEVICE_TOKEN_1 }}
+          FCM_DEVICE_TOKEN_2: ${{ secrets.FCM_DEVICE_TOKEN_2 }}
+        run: |
+          for TOKEN_VAR in "$FCM_DEVICE_TOKEN_1" "$FCM_DEVICE_TOKEN_2"; do
+            if [ -n "$FCM_SERVER_KEY" ] && [ -n "$TOKEN_VAR" ]; then
+              curl -s -X POST "https://fcm.googleapis.com/fcm/send" \
+                -H "Authorization: key=${FCM_SERVER_KEY}" \
+                -H "Content-Type: application/json" \
+                -d "{\"to\":\"${TOKEN_VAR}\",\"notification\":{\"title\":\"Alpha Scout FAILED\",\"body\":\"Workflow error. Check Actions.\",\"click_action\":\"https://github.com/${{ github.repository }}/actions\"}}"
+            fi
+          done

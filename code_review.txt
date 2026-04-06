@@ -1,0 +1,367 @@
+ALPHA SCOUT CODE REVIEW
+========================
+Date: 2026-04-06
+Files reviewed: alpha_scout.py, daily_scan.yml, requirements.txt, history.json
+
+
+=============================================================================
+BUGS — Will cause incorrect behavior or crashes
+=============================================================================
+
+BUG-1: is_price_drop variable undefined in speculative tier alert (line 807)
+  Line 807 references `is_price_drop` but the variable is never assigned in
+  the `if confidence < 0.65` block. The `is_price_drop = item.get(...)`
+  extraction that exists for Stage 3 (around where `handle` is set) does NOT
+  exist here. The code at line 746 sets `handle = item["handle"]` but there
+  is no `is_price_drop = item.get("is_price_drop", False)` before the
+  speculative tier block at line 788.
+
+  Wait — checking again: there is no `is_price_drop` local variable set
+  anywhere before line 807. The Stage 3 block at line 888 also references
+  `is_price_drop` without it being set locally.
+
+  ACTUAL STATE: Neither alert block sets `is_price_drop` as a local variable.
+  Both reference it at lines 807, 810, 888, 891. This will raise a
+  NameError if any item actually triggers an alert.
+
+  FIX: Add `is_price_drop = item.get("is_price_drop", False)` right after
+  `handle = item["handle"]` at line 746.
+
+BUG-2: gemini_calls_today counter persists failed calls from previous runs
+  Line 700: `stats["gemini_calls"]` is initialized from
+  `history["gemini_calls_today"]`. The reset at line 110-117 only resets
+  if the date changed. But if the script runs TWICE in one day (manual
+  trigger + scheduled), the second run starts with the first run's count.
+  This is correct behavior per spec. However, the `gemini_failures` counter
+  in stats (line 767) is initialized to 0 each run while gemini_calls
+  carries over. This means the batch summary at line 917-919 will report
+  `gemini_successes = (calls_from_all_runs_today) - (failures_this_run)`,
+  which overstates successes on multi-run days.
+
+  FIX: Track gemini_calls_this_run separately from the cumulative counter.
+
+BUG-3: Unused import — `from google.genai import types` (line 20)
+  The `types` module is imported but never used anywhere in the code.
+  Not a crash bug but will generate linter warnings and confuses readers.
+
+  FIX: Remove the import.
+
+BUG-4: Shopify pagination may infinite-loop on API errors
+  Line 152-164: `scrape_products` loops `while True` and only breaks when
+  `products` is empty. The `retry` wrapper will re-raise after 3 failures,
+  which propagates up correctly. However, if the API returns a 200 with
+  malformed JSON (non-empty but no "products" key), `resp.json().get(
+  "products", [])` returns [] and the loop terminates cleanly. This is fine.
+
+  BUT: Shopify's pagination API can return the same page repeatedly if you
+  go past the last page (it returns page 1 again instead of empty). There
+  is no page count guard. If the site has exactly N*250 items, page N+1
+  returns [] and it works. But some Shopify stores return stale data on
+  high page numbers.
+
+  LOW RISK but worth noting. A `max_pages = 50` guard would prevent
+  infinite loops (50 * 250 = 12,500 items, well above any estate sale).
+
+BUG-5: Price comparison uses == on floats (line 711)
+  `hist_entry.get("last_seen_price") == item["price"]` compares float
+  values loaded from JSON. JSON round-trips floats correctly in most cases,
+  but Shopify prices like "19.99" become 19.99 (float), which will
+  serialize to `19.99` in JSON and deserialize back identically. This is
+  SAFE for currency values with 2 decimal places but worth noting.
+
+  NO FIX NEEDED — safe for this use case.
+
+
+=============================================================================
+FREE TIER COMPLIANCE — Risk of unexpected charges
+=============================================================================
+
+TIER-1: Gemini budget enforcement is correct
+  Line 737: Hard check `stats["gemini_calls"] >= DAILY_GEMINI_BUDGET`
+  before every call. Budget is 1400, free limit is 1500. 100-call buffer.
+  The check runs BEFORE the call, not after. Correct.
+
+TIER-2: Etsy budget enforcement is correct
+  Line 840: `etsy_calls_today < DAILY_ETSY_BUDGET` checked before each
+  call. Cap is 500. Etsy has no published rate limit so this is defensive.
+
+TIER-3: No Shopify rate limiting
+  Shopify JSON API has no published rate limit for public storefronts,
+  but aggressive scraping can trigger temporary blocks. The retry wrapper
+  handles 429s, but there is no delay between pages. For ~19 pages
+  (4600 items / 250), this fires 19 requests in rapid succession.
+
+  LOW RISK — Shopify public APIs are tolerant. But adding a 0.5s delay
+  between pages would be defensive.
+
+TIER-4: httpx.Client created per Gemini image download (line 235)
+  Each image download creates a new `httpx.Client(timeout=15)`. This
+  happens inside `call_gemini` which runs inside the main `with httpx.Client()
+  as client` block. The outer client could be passed in and reused for
+  image downloads, avoiding per-call connection overhead.
+
+  NOT A BILLING RISK — just inefficient.
+
+TIER-5: FCM is free (1M messages/month). No enforcement needed.
+
+TIER-6: Telegram is free and unlimited. No enforcement needed.
+
+
+=============================================================================
+GEMINI INTEGRATION — google-genai SDK usage
+=============================================================================
+
+GEM-1: SDK usage appears correct for basic generation
+  `genai.Client(api_key=...)` and `client.models.generate_content(model=...,
+  contents=...)` match the google-genai SDK pattern. PIL Image objects are
+  accepted as contents.
+
+GEM-2: gemini-1.5-flash availability uncertain
+  Line 34: `GEMINI_MODEL = "gemini-1.5-flash"`. The original migration was
+  done because this model returned 404 on the old SDK. It may also 404 on
+  the new SDK if Google has deprecated the model entirely (not just the SDK).
+  If 404s continue, try "gemini-2.0-flash" or "gemini-2.0-flash-lite".
+  Monitor the Actions logs.
+
+GEM-3: response.text access is fragile
+  Line 252: `response.text if hasattr(response, 'text') and response.text`
+  The google-genai SDK's GenerateContentResponse may have `.text` raise
+  an exception if the response was blocked by safety filters. The hasattr
+  check won't catch that — it checks attribute existence, not whether
+  accessing it throws. A safer pattern:
+    try:
+        raw_text = response.text or ""
+    except (ValueError, AttributeError):
+        raw_text = ""
+
+GEM-4: Rate limit sleep may be insufficient
+  Line 755: `time.sleep(0.5)` targets 15 RPM (one request per 4 seconds).
+  0.5s sleep = 120 RPM theoretical max. This will trigger 429s. The free
+  tier for gemini-1.5-flash is 15 RPM. You need `time.sleep(4.0)` to stay
+  under 15 RPM, or at minimum `time.sleep(2.0)` to stay under 30 RPM
+  (which some models allow).
+
+  At 0.5s, processing 1400 items takes ~12 minutes. At 4.0s, it takes
+  ~93 minutes. The Actions runner has a 6-hour timeout so this is fine.
+
+  RECOMMENDED: Increase to `time.sleep(4.0)` to match 15 RPM. The current
+  0.5s will burn through retry attempts on 429 errors.
+
+GEM-5: No retry on Gemini calls
+  `call_gemini` has no retry wrapper. Shopify scrape and Etsy calls both
+  have retry logic, but Gemini — the most critical and flaky API — does not.
+  A transient 429 or 503 from Gemini kills that item permanently (marked
+  as "error" in history).
+
+  RECOMMENDED: Wrap the `client.models.generate_content()` call in the
+  existing `retry()` helper with 3 attempts.
+
+
+=============================================================================
+ERROR HANDLING
+=============================================================================
+
+ERR-1: history.json save only happens at the end (line 951)
+  If the script crashes mid-run (OOM, Actions timeout, unhandled exception),
+  ALL history updates for that run are lost. Items processed before the crash
+  will be reprocessed next run, burning Gemini budget on duplicates.
+
+  RECOMMENDED: Save history periodically (every 100 items) or wrap the
+  main loop in try/finally to ensure save_history runs on crash.
+
+ERR-2: send_telegram can pass None bot (line 588)
+  `send_telegram(bot: Bot, text: str)` — when FCM is enabled, `bot` is
+  None (line 651). The `send_telegram` function has `if DRY_RUN or not
+  TELEGRAM_ENABLED: return` at line 589, so it won't reach `bot.send_message`
+  when bot is None. This is SAFE but fragile — if someone removes the
+  TELEGRAM_ENABLED check, it crashes. The callers at lines 667, 808, 889
+  already check `if TELEGRAM_ENABLED and bot`, so the double-check is
+  redundant but harmless.
+
+ERR-3: Estate site failure doesn't save history (line 664-670)
+  If scrape_products raises, the function returns without calling
+  save_history. This means the run_count doesn't increment and
+  gemini_calls_today isn't persisted. For a scrape failure this is
+  acceptable — no items were processed. But if prune_old_history (line 639)
+  already modified history, those prune changes are lost.
+
+  LOW RISK — pruning the same items next run is harmless.
+
+ERR-4: git stash in workflow can fail if nothing to stash (line 36)
+  `git stash` exits with code 1 if there's nothing to stash. This will
+  fail the step and trigger the failure alert. The `git stash pop` will
+  also fail if there was nothing stashed.
+
+  FIX: Use `git stash --include-untracked || true` and
+  `git stash pop || true`, or check if stash is needed first.
+
+
+=============================================================================
+HISTORY.JSON LOGIC
+=============================================================================
+
+HIST-1: Deduplication logic is correct
+  Handle in history + same price = skip. Handle in history + different
+  price = re-evaluate. Handle not in history = new. Items gone from site
+  = removed from history. This matches the spec.
+
+HIST-2: Stale item removal is aggressive
+  Line 687-691: Items no longer on the site are immediately removed from
+  history. If the estate site has a temporary API glitch that returns 0
+  products, this wipes the entire history. The scrape_products function
+  would return an empty list, current_handles would be empty, and every
+  history item would be "stale."
+
+  RECOMMENDED: Add a guard: `if len(products) < 100:` log a warning and
+  skip the stale removal. A legitimate estate site with 4600+ items
+  won't suddenly drop to 0 unless something is wrong.
+
+HIST-3: Price drop detection counts price INCREASES too
+  Line 711-719: The check is `last_seen_price == item["price"]` — if
+  they differ, it's treated as a price drop. But the price could have
+  gone UP. The spec says "price dropped" but the code triggers on any
+  price change. The `is_price_drop` flag is set regardless of direction.
+
+  LOW IMPACT — price increases are rare for estate sales and re-evaluation
+  is harmless. But the "Price Drop" label in alerts would be misleading
+  for a price increase.
+
+HIST-4: prune_old_history keeps alerted items forever
+  Line 125-126: Items with `alerted: True` are never pruned regardless
+  of age. Over months/years this could grow. Not urgent — with daily
+  stale removal (HIST-2) most items cycle out quickly anyway.
+
+
+=============================================================================
+TELEGRAM FORMATTING
+=============================================================================
+
+TG-1: MarkdownV2 alert messages have unescaped em-dashes
+  Line 455: `drop_suffix = " \u2014 Price Drop"` — the em-dash is not
+  escaped for MarkdownV2. The header line is NOT wrapped in escape_md2.
+  Line 464: `f"{emoji} SPECULATIVE \u2014 Verify before buying{drop_suffix}"`
+  also has an unescaped em-dash.
+  Line 483: price_drop_line has unescaped em-dash.
+  Line 490: `\u2013` (en-dash) in Gemini estimate line is not escaped.
+
+  These may or may not cause parse errors depending on Telegram's parser
+  mood. The heartbeat was already migrated to HTML for this exact reason.
+
+  RECOMMENDED: Migrate alert messages to HTML too, or escape all Unicode
+  dashes.
+
+TG-2: Heartbeat HTML is clean
+  Lines 510-535: Plain HTML with <b> tags, no MarkdownV2. escape_html
+  handles &, <, >. No issues found.
+
+TG-3: Alert link URLs are not escaped
+  Lines 498-500: URLs inside `[label](url)` are not escaped. If a product
+  handle contains MarkdownV2 special chars (unlikely for Shopify handles
+  but possible for Google search URLs), the link will break. The Google
+  URL at line 433 uses quote_plus which handles most cases.
+
+  LOW RISK — Shopify handles are URL-safe slugs.
+
+
+=============================================================================
+FCM INTEGRATION
+=============================================================================
+
+FCM-1: Feature flag timing is correct
+  Line 59: `FCM_ENABLED = date.today() >= LAUNCH_DATE + timedelta(days=5)`
+  With LAUNCH_DATE = 2026-04-05, FCM enables on 2026-04-10. Telegram
+  disables on the same date. Both derived from one env var.
+
+FCM-2: FCM legacy API is deprecated
+  Line 549: `https://fcm.googleapis.com/fcm/send` is the FCM Legacy HTTP
+  API. Google has deprecated it in favor of the FCM v1 API (using
+  `https://fcm.googleapis.com/v1/projects/{project_id}/messages:send`
+  with OAuth2). The legacy API still works but may be shut down.
+
+  RECOMMENDED: Plan migration to FCM v1 API before Google sets a sunset
+  date.
+
+FCM-3: Empty URL passed to FCM heartbeat
+  Line 945: `send_fcm(..., "")` passes empty string as click_action URL.
+  This means tapping the heartbeat notification does nothing. Not a bug
+  but could link to the GitHub Actions page.
+
+FCM-4: FCM_DEVICE_TOKENS limited to 2
+  Lines 53-58: Only TOKEN_1 and TOKEN_2 are read. Adding a third device
+  requires a code change. A loop over `FCM_DEVICE_TOKEN_{N}` would be
+  more flexible but this is fine for now.
+
+
+=============================================================================
+WORKFLOW (daily_scan.yml)
+=============================================================================
+
+WF-1: git stash/pop will fail when nothing to stash (CRITICAL)
+  Lines 36-38: `git stash` exits non-zero when working tree is clean.
+  `git stash pop` fails when stash is empty. Both will fail the workflow
+  step and trigger the failure alert curl.
+
+  In practice, after running alpha_scout.py, history.json is modified so
+  there IS something to stash. But if the script fails before modifying
+  history.json, the stash step fails.
+
+  FIX: `git stash --include-untracked || true` and `git stash pop || true`
+
+WF-2: Failure alert only uses Telegram
+  Lines 46-49: The workflow failure alert sends via Telegram curl, even
+  after FCM is enabled. Once FCM_ENABLED is true and Telegram is disabled,
+  the failure alert becomes a no-op (TELEGRAM_BOT_TOKEN secret may still
+  be set, so the curl sends, but nobody is monitoring Telegram anymore).
+
+  RECOMMENDED: Add FCM failure alert alongside Telegram, or switch based
+  on LAUNCH_DATE.
+
+WF-3: fetch-depth: 0 is unnecessary
+  Line 14: Full git history is fetched but never used. `fetch-depth: 1`
+  (default) is sufficient and faster.
+
+WF-4: GITHUB_TOKEN is the default — explicit token line is redundant
+  Line 15: `token: ${{ secrets.GITHUB_TOKEN }}` is the default for
+  actions/checkout. Not harmful, just unnecessary.
+
+
+=============================================================================
+MINOR / STYLE
+=============================================================================
+
+MINOR-1: base64 import (line 5) only used by eBay which is disabled
+  Not a problem but dead code when EBAY_ENABLED is false.
+
+MINOR-2: Gemini batch summary double-counts budget-carried calls
+  See BUG-2 above.
+
+MINOR-3: No `.gitignore` in the repo
+  Python bytecode (__pycache__), .env files, and IDE files could
+  accidentally be committed.
+
+
+=============================================================================
+SUMMARY — Priority fixes
+=============================================================================
+
+CRITICAL:
+  1. BUG-1: is_price_drop NameError — will crash on any alert
+  2. WF-1: git stash failure — will trigger false failure alerts
+
+HIGH:
+  3. GEM-4: Increase Gemini sleep to 4.0s to match 15 RPM limit
+  4. GEM-5: Add retry wrapper around Gemini API calls
+  5. ERR-1: Save history on crash (try/finally)
+  6. HIST-2: Guard against empty scrape wiping history
+
+MEDIUM:
+  7. TG-1: Unescaped em-dashes in alert messages
+  8. WF-2: Workflow failure alert doesn't use FCM
+  9. GEM-3: response.text may throw on safety-filtered responses
+  10. BUG-2: Batch summary miscounts on multi-run days
+
+LOW:
+  11. FCM-2: Migrate to FCM v1 API before legacy sunset
+  12. BUG-3: Remove unused `types` import
+  13. WF-3: fetch-depth: 0 unnecessary
+  14. HIST-3: Price increase triggers "Price Drop" label
