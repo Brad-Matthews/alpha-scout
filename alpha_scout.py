@@ -296,12 +296,12 @@ def clean_title_for_etsy(title: str) -> str:
     cleaned = re.sub(r"\(.*?\)", "", cleaned)                 # other parentheticals
     for word in ["antique", "vintage", "estate"]:
         cleaned = re.sub(rf"\b{word}\b", "", cleaned, flags=re.IGNORECASE)
-    return " ".join(cleaned.split())
+    return " ".join(cleaned.split())[:100]
 
 
 def _etsy_request(client: httpx.Client, cleaned: str) -> dict:
     """Single Etsy API call (retryable unit)."""
-    headers = {"x-api-key": ETSY_API_KEY}
+    headers = {"x-api-key": ETSY_API_KEY, "Accept": "application/json"}
     params = {"keywords": cleaned, "limit": 25, "sort_on": "price", "sort_order": "asc"}
     resp = client.get(
         "https://api.etsy.com/v3/application/listings/active",
