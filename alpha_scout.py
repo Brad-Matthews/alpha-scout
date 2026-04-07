@@ -69,7 +69,9 @@ DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
 ESTATE_BASE_URL     = "https://mainstreetestatesales.com"
 PRODUCTS_JSON_URL   = f"{ESTATE_BASE_URL}/collections/all/products.json"
 HISTORY_PATH        = os.path.join(os.path.dirname(os.path.abspath(__file__)), "history.json")
+CURRENT_ALERT_PATH  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "current_alert.json")
 ACTIONS_URL         = "https://github.com/Brad-Matthews/alpha-scout/actions"
+ALERT_PAGE_URL      = "https://brad-matthews.github.io/alpha-scout/alert.html"
 
 DENVER_TZ = ZoneInfo("America/Denver")
 
@@ -110,6 +112,35 @@ def load_history() -> dict:
 def save_history(history: dict) -> None:
     with open(HISTORY_PATH, "w") as f:
         json.dump(history, f, indent=2)
+
+
+def write_current_alert(item: dict, gemini_data: dict, etsy_data: dict,
+                        market_est: float, gross_profit: float, tier: str,
+                        is_price_drop: bool) -> None:
+    """Write the latest alert to current_alert.json for the GitHub Pages alert card."""
+    now = datetime.now(DENVER_TZ)
+    profit_pct = int((gross_profit / item["price"]) * 100) if item["price"] > 0 else 0
+    alert_data = {
+        "title": item["title"],
+        "image_url": item.get("image_url", ""),
+        "estate_price": int(item["price"]),
+        "market_estimate": int(market_est),
+        "gross_profit": int(gross_profit),
+        "profit_pct": profit_pct,
+        "tier": tier,
+        "confidence": int(gemini_data.get("confidence", 0) * 100),
+        "key_signals": gemini_data.get("key_signals", ""),
+        "estate_url": f"{ESTATE_BASE_URL}/products/{item['handle']}",
+        "etsy_url": etsy_data.get("etsy_search_url", ""),
+        "google_url": f"https://google.com/search?q={quote_plus(re.sub(r'\\(.*?\\)', '', item['title']).strip())}",
+        "scouted_at": f"{now.strftime('%-I:%M %p')} · {now.strftime('%B %-d, %Y')}",
+    }
+    try:
+        with open(CURRENT_ALERT_PATH, "w") as f:
+            json.dump(alert_data, f, indent=2)
+        log.info(f"Wrote current_alert.json: {item['title'][:50]}")
+    except Exception as e:
+        log.error(f"Failed to write current_alert.json: {e}")
 
 
 def reset_daily_gemini_counter(history: dict) -> dict:
@@ -533,7 +564,7 @@ def build_heartbeat(stats: dict) -> str:
 # FCM (Firebase Cloud Messaging) helpers
 # ---------------------------------------------------------------------------
 
-def send_fcm(title: str, body: str, url: str) -> None:
+def send_fcm(title: str, body: str, url: str, image_url: str = "") -> None:
     """Send FCM push notification to all registered device tokens.
     NOTE: Uses deprecated FCM Legacy HTTP API. Migrate to FCM v1 API when convenient."""
     if not FCM_SERVER_KEY or not FCM_DEVICE_TOKENS:
@@ -541,6 +572,13 @@ def send_fcm(title: str, body: str, url: str) -> None:
         return
     for token in FCM_DEVICE_TOKENS:
         try:
+            notification = {
+                "title": title,
+                "body": body,
+                "click_action": url,
+            }
+            if image_url:
+                notification["image"] = image_url
             resp = httpx.post(
                 "https://fcm.googleapis.com/fcm/send",
                 headers={
@@ -549,11 +587,7 @@ def send_fcm(title: str, body: str, url: str) -> None:
                 },
                 json={
                     "to": token,
-                    "notification": {
-                        "title": title,
-                        "body": body,
-                        "click_action": url,
-                    },
+                    "notification": notification,
                     "data": {"url": url},
                 },
                 timeout=15,
@@ -566,16 +600,17 @@ def send_fcm(title: str, body: str, url: str) -> None:
 
 def build_fcm_alert(item: dict, gemini_data: dict, market_est: float,
                     gross_profit: float, roi: float, tier: str,
-                    is_price_drop: bool = False) -> tuple[str, str, str]:
-    """Returns (title, body, url) for FCM notification."""
+                    is_price_drop: bool = False) -> tuple[str, str, str, str]:
+    """Returns (title, body, url, image_url) for FCM notification."""
     drop_tag = " - Price Drop" if is_price_drop else ""
     title = f"{tier} ALPHA{drop_tag}: {item['title'][:50]}"
     body = (
         f"Estate: ${item['price']:.0f} -> Est. Value: ${market_est:.0f} "
         f"(~${gross_profit:.0f} profit, {roi:.1f}x ROI)"
     )
-    url = f"{ESTATE_BASE_URL}/products/{item['handle']}"
-    return title, body, url
+    url = ALERT_PAGE_URL
+    image_url = item.get("image_url", "")
+    return title, body, url, image_url
 
 # ---------------------------------------------------------------------------
 # Main pipeline
@@ -815,13 +850,14 @@ async def main() -> None:
                             if FCM_ENABLED:
                                 log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
                         else:
+                            write_current_alert(item, gemini_data, etsy_data, market_est, gross_profit, tier, is_price_drop)
                             if TELEGRAM_ENABLED and bot:
                                 alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
                                                                 is_price_drop=is_price_drop)
                                 await send_telegram(bot, alert_msg)
                             if FCM_ENABLED:
-                                fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
-                                send_fcm(fcm_title, fcm_body, fcm_url)
+                                fcm_title, fcm_body, fcm_url, fcm_img = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
+                                send_fcm(fcm_title, fcm_body, fcm_url, fcm_img)
                             time.sleep(1)
                         stats["alerts_sent"] += 1
                         history["items"][handle] = {
@@ -896,13 +932,14 @@ async def main() -> None:
                         if FCM_ENABLED:
                             log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
                     else:
+                        write_current_alert(item, gemini_data, etsy_data, market_est, gross_profit, tier, is_price_drop)
                         if TELEGRAM_ENABLED and bot:
                             alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
                                                             is_price_drop=is_price_drop)
                             await send_telegram(bot, alert_msg)
                         if FCM_ENABLED:
-                            fcm_title, fcm_body, fcm_url = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
-                            send_fcm(fcm_title, fcm_body, fcm_url)
+                            fcm_title, fcm_body, fcm_url, fcm_img = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
+                            send_fcm(fcm_title, fcm_body, fcm_url, fcm_img)
                         time.sleep(1)  # 1-second delay between messages
                     stats["alerts_sent"] += 1
                     history["items"][handle] = {

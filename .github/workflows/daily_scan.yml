@@ -36,7 +36,7 @@ jobs:
           git stash --include-untracked || true
           git pull --rebase origin main
           git stash pop || true
-          git add history.json
+          git add history.json current_alert.json
           git diff --staged --quiet || git commit -m "Update history.json after daily scan"
           git push origin main
 
