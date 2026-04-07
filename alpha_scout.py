@@ -27,7 +27,8 @@ from telegram.constants import ParseMode
 DAILY_GEMINI_BUDGET = 450    # Hard stop below 500 RPD free limit
 DAILY_ETSY_BUDGET   = 500    # Defensive cap
 ALPHA_MIN_PROFIT    = 100    # Minimum gross profit in dollars
-ALPHA_MIN_ROI       = 1.5    # Minimum ROI multiplier
+ALPHA_MIN_ROI       = 1.5    # Minimum ROI multiplier (paired with profit threshold)
+ALPHA_HIGH_ROI      = 3.0    # High ROI threshold — alerts regardless of dollar amount
 CONFIDENCE_SKIP     = 0.50   # Below this: no alert, just log
 HISTORY_PRUNE_DAYS  = 90     # Remove unseen/unalerted items older than this
 HISTORY_PRUNE_ALERTED_DAYS = 365  # Remove alerted items older than 1 year
@@ -116,7 +117,7 @@ def save_history(history: dict) -> None:
 
 def write_current_alert(item: dict, gemini_data: dict, etsy_data: dict,
                         market_est: float, gross_profit: float, tier: str,
-                        is_price_drop: bool) -> None:
+                        is_price_drop: bool, alert_type: str = "profit") -> None:
     """Write the latest alert to current_alert.json for the GitHub Pages alert card."""
     now = datetime.now(DENVER_TZ)
     profit_pct = int((gross_profit / item["price"]) * 100) if item["price"] > 0 else 0
@@ -135,6 +136,7 @@ def write_current_alert(item: dict, gemini_data: dict, etsy_data: dict,
         "etsy_url": etsy_data.get("etsy_search_url", ""),
         "google_url": f"https://google.com/search?q={quote_plus(clean_google_title)}",
         "scouted_at": f"{now.strftime('%-I:%M %p')} · {now.strftime('%B %-d, %Y')}",
+        "alert_type": alert_type,
     }
     try:
         with open(CURRENT_ALERT_PATH, "w") as f:
@@ -466,7 +468,7 @@ def escape_html(text: str) -> str:
 
 def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_est: float,
                         gross_profit: float, roi: float, tier: str,
-                        is_price_drop: bool = False) -> str:
+                        is_price_drop: bool = False, alert_type: str = "profit") -> str:
     """Build alert message as HTML for Telegram."""
     conf_pct = int(gemini_data["confidence"] * 100)
     low = gemini_data["estimated_resale_low"]
@@ -487,12 +489,20 @@ def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_e
     price_str = f"{item['price']:.0f}"
 
     drop_suffix = " - Price Drop" if is_price_drop else ""
-    if tier == "HIGH":
-        header = f"\U0001f7e2 HIGH CONFIDENCE ALPHA{drop_suffix}"
-    elif tier == "MEDIUM":
-        header = f"\U0001f7e1 MEDIUM CONFIDENCE ALPHA{drop_suffix}"
+    if alert_type == "roi":
+        if tier == "HIGH":
+            header = f"\U0001f48e HIGH ROI FIND{drop_suffix}"
+        elif tier == "MEDIUM":
+            header = f"\U0001f48e MEDIUM CONFIDENCE - High ROI{drop_suffix}"
+        else:
+            header = f"\U0001f48e SPECULATIVE - High ROI{drop_suffix}"
     else:
-        header = f"\U0001f534 SPECULATIVE - Verify before buying{drop_suffix}"
+        if tier == "HIGH":
+            header = f"\U0001f7e2 HIGH CONFIDENCE ALPHA{drop_suffix}"
+        elif tier == "MEDIUM":
+            header = f"\U0001f7e1 MEDIUM CONFIDENCE ALPHA{drop_suffix}"
+        else:
+            header = f"\U0001f534 SPECULATIVE - Verify before buying{drop_suffix}"
 
     # Etsy market line
     if etsy_count >= 3:
@@ -507,8 +517,10 @@ def build_alert_message(item: dict, gemini_data: dict, etsy_data: dict, market_e
         profit_pct = (gross_profit / item["price"] * 100) if item["price"] > 0 else 0
         value_lines = (
             f"\u2705 Est. Market Value: <b>${market_est:.0f}</b>\n"
-            f"\U0001f4c8 Potential Profit: <b>~${gross_profit:.0f}</b> (+{profit_pct:.0f}% profit)"
+            f"\U0001f4c8 Potential Profit: <b>~${gross_profit:.0f}</b> (+{profit_pct:.0f}% return)"
         )
+        if alert_type == "roi":
+            value_lines += f"\n\U0001f48e High ROI alert - strong multiplier on low-cost item"
     else:
         value_lines = ""
 
@@ -548,7 +560,7 @@ def build_heartbeat(stats: dict) -> str:
         f"\U0001f195 New items: <b>{s['new_items']}</b>\n"
         f"\u23ed Skipped (seen before): <b>{s['skipped']}</b>\n"
         f"\U0001f504 Re-evaluated (price drop): <b>{s['price_drops']}</b>\n"
-        f"\u2705 Alerts sent: <b>{s['alerts_sent']}</b>\n"
+        f"\u2705 Alerts sent: <b>{s['alerts_sent']}</b> ({s.get('high_profit_alerts', 0)} profit, {s.get('high_roi_alerts', 0)} high ROI)\n"
         f"\u274c Below threshold: <b>{s['below_threshold']}</b>\n"
         f"\U0001f916 Gemini calls used: <b>{s['gemini_calls']} / {DAILY_GEMINI_BUDGET}</b> daily budget\n"
         f"\U0001f9e0 Model: <b>{escape_html(GEMINI_MODEL)}</b>\n\n"
@@ -845,22 +857,29 @@ async def main() -> None:
 
                     tier = confidence_tier(confidence, etsy_data["etsy_listing_count"])
 
-                    if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
+                    high_profit = gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI
+                    high_roi = roi >= ALPHA_HIGH_ROI
+                    if high_profit or high_roi:
+                        alert_type = "roi" if high_roi and not high_profit else "profit"
                         if DRY_RUN:
-                            log.info(f"[DRY RUN] Would send alert: {tier} — {item['title']}")
+                            log.info(f"[DRY RUN] Would send alert: {tier} ({alert_type}) — {item['title']}")
                             if FCM_ENABLED:
                                 log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
                         else:
-                            write_current_alert(item, gemini_data, etsy_data, market_est, gross_profit, tier, is_price_drop)
+                            write_current_alert(item, gemini_data, etsy_data, market_est, gross_profit, tier, is_price_drop, alert_type)
                             if TELEGRAM_ENABLED and bot:
                                 alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
-                                                                is_price_drop=is_price_drop)
+                                                                is_price_drop=is_price_drop, alert_type=alert_type)
                                 await send_telegram(bot, alert_msg)
                             if FCM_ENABLED:
                                 fcm_title, fcm_body, fcm_url, fcm_img = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
                                 send_fcm(fcm_title, fcm_body, fcm_url, fcm_img)
                             time.sleep(1)
                         stats["alerts_sent"] += 1
+                        if alert_type == "roi":
+                            stats["high_roi_alerts"] = stats.get("high_roi_alerts", 0) + 1
+                        else:
+                            stats["high_profit_alerts"] = stats.get("high_profit_alerts", 0) + 1
                         history["items"][handle] = {
                             "title": item["title"],
                             "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),
@@ -927,22 +946,29 @@ async def main() -> None:
                 # ---------------------------------------------------------------
                 tier = confidence_tier(confidence, etsy_count)
 
-                if gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI:
+                high_profit = gross_profit >= ALPHA_MIN_PROFIT and roi >= ALPHA_MIN_ROI
+                high_roi = roi >= ALPHA_HIGH_ROI
+                if high_profit or high_roi:
+                    alert_type = "roi" if high_roi and not high_profit else "profit"
                     if DRY_RUN:
-                        log.info(f"[DRY RUN] Would send alert: {tier} — {item['title']}")
+                        log.info(f"[DRY RUN] Would send alert: {tier} ({alert_type}) — {item['title']}")
                         if FCM_ENABLED:
                             log.info(f"[DRY RUN] Would send FCM notification: {tier} ALPHA: {item['title'][:50]}")
                     else:
-                        write_current_alert(item, gemini_data, etsy_data, market_est, gross_profit, tier, is_price_drop)
+                        write_current_alert(item, gemini_data, etsy_data, market_est, gross_profit, tier, is_price_drop, alert_type)
                         if TELEGRAM_ENABLED and bot:
                             alert_msg = build_alert_message(item, gemini_data, etsy_data, market_est, gross_profit, roi, tier,
-                                                            is_price_drop=is_price_drop)
+                                                            is_price_drop=is_price_drop, alert_type=alert_type)
                             await send_telegram(bot, alert_msg)
                         if FCM_ENABLED:
                             fcm_title, fcm_body, fcm_url, fcm_img = build_fcm_alert(item, gemini_data, market_est, gross_profit, roi, tier, is_price_drop)
                             send_fcm(fcm_title, fcm_body, fcm_url, fcm_img)
                         time.sleep(1)  # 1-second delay between messages
                     stats["alerts_sent"] += 1
+                    if alert_type == "roi":
+                        stats["high_roi_alerts"] = stats.get("high_roi_alerts", 0) + 1
+                    else:
+                        stats["high_profit_alerts"] = stats.get("high_profit_alerts", 0) + 1
                     history["items"][handle] = {
                         "title": item["title"],
                         "first_seen": history["items"].get(handle, {}).get("first_seen", today_str),

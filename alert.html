@@ -300,12 +300,18 @@
     <script>
         const ALERT_URL = "current_alert.json";
 
-        function tierLabel(tier) {
+        function tierLabel(tier, alertType) {
+            if (alertType === "roi") {
+                if (tier === "HIGH") return "\u{1F48E} High ROI Find";
+                if (tier === "MEDIUM") return "\u{1F48E} Medium - High ROI";
+                return "\u{1F48E} Speculative - High ROI";
+            }
             if (tier === "HIGH") return "High Confidence";
             if (tier === "MEDIUM") return "Medium Confidence";
             return "Speculative";
         }
-        function tierClass(tier) {
+        function tierClass(tier, alertType) {
+            if (alertType === "roi") return "high";  // diamond alerts use green dot
             if (tier === "HIGH") return "high";
             if (tier === "MEDIUM") return "medium";
             return "speculative";
@@ -317,8 +323,8 @@
                 <img src="${d.image_url}" alt="${d.title}" onerror="this.style.display='none'">
                 <div class="hero-overlay"></div>
                 <div class="badge-tier">
-                    <span class="badge-dot ${tierClass(d.tier)}"></span>
-                    ${tierLabel(d.tier)}
+                    <span class="badge-dot ${tierClass(d.tier, d.alert_type)}"></span>
+                    ${tierLabel(d.tier, d.alert_type)}
                 </div>
                 <div class="badge-logo">
                     <img src="/alpha-scout/logo.png" alt="Logo">
