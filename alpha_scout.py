@@ -120,6 +120,7 @@ def write_current_alert(item: dict, gemini_data: dict, etsy_data: dict,
     """Write the latest alert to current_alert.json for the GitHub Pages alert card."""
     now = datetime.now(DENVER_TZ)
     profit_pct = int((gross_profit / item["price"]) * 100) if item["price"] > 0 else 0
+    clean_google_title = re.sub(r"\(.*?\)", "", item["title"]).strip()
     alert_data = {
         "title": item["title"],
         "image_url": item.get("image_url", ""),
@@ -132,7 +133,7 @@ def write_current_alert(item: dict, gemini_data: dict, etsy_data: dict,
         "key_signals": gemini_data.get("key_signals", ""),
         "estate_url": f"{ESTATE_BASE_URL}/products/{item['handle']}",
         "etsy_url": etsy_data.get("etsy_search_url", ""),
-        "google_url": f"https://google.com/search?q={quote_plus(re.sub(r'\\(.*?\\)', '', item['title']).strip())}",
+        "google_url": f"https://google.com/search?q={quote_plus(clean_google_title)}",
         "scouted_at": f"{now.strftime('%-I:%M %p')} · {now.strftime('%B %-d, %Y')}",
     }
     try:
