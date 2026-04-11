@@ -26,6 +26,7 @@ jobs:
           FCM_SERVER_KEY: ${{ secrets.FCM_SERVER_KEY }}
           FCM_DEVICE_TOKEN_1: ${{ secrets.FCM_DEVICE_TOKEN_1 }}
           FCM_DEVICE_TOKEN_2: ${{ secrets.FCM_DEVICE_TOKEN_2 }}
+          FCM_PROJECT_ID: ${{ secrets.FCM_PROJECT_ID }}
           LAUNCH_DATE: ${{ secrets.LAUNCH_DATE }}
         run: python alpha_scout.py
 

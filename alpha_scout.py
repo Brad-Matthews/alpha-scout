@@ -54,20 +54,23 @@ EBAY_ENABLED        = bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
 # when Google announces a sunset date. Legacy API still works as of April 2026.
 LAUNCH_DATE_STR     = os.environ.get("LAUNCH_DATE", "").strip() or "2026-04-05"
 LAUNCH_DATE         = date.fromisoformat(LAUNCH_DATE_STR)
-FCM_SERVER_KEY      = os.environ.get("FCM_SERVER_KEY", "")
+FCM_SERVER_KEY      = os.environ.get("FCM_SERVER_KEY", "")  # Legacy key, kept for fallback
+FCM_PROJECT_ID      = os.environ.get("FCM_PROJECT_ID", "")
 FCM_DEVICE_TOKENS   = [
     t for t in [
         os.environ.get(f"FCM_DEVICE_TOKEN_{i}", "")
         for i in range(1, 6)  # Supports up to 5 devices — just add secrets
     ] if t
 ]
-# FCM activates 5 days after launch; also requires server key + at least one device token
+# FCM activates 5 days after launch; requires credentials + at least one device token
 FCM_ENABLED         = (date.today() >= LAUNCH_DATE + timedelta(days=5)
-                       and bool(FCM_SERVER_KEY) and len(FCM_DEVICE_TOKENS) > 0)
+                       and (bool(FCM_SERVER_KEY) or bool(FCM_PROJECT_ID))
+                       and len(FCM_DEVICE_TOKENS) > 0)
 TELEGRAM_ENABLED    = not FCM_ENABLED
 
 # Dry-run mode — scrape + Gemini run normally, skip Etsy/Telegram/FCM sends
 DRY_RUN = os.environ.get("DRY_RUN", "false").lower() == "true"
+GITHUB_EVENT_NAME   = os.environ.get("GITHUB_EVENT_NAME", "")  # "workflow_dispatch" for manual triggers
 
 ESTATE_BASE_URL     = "https://mainstreetestatesales.com"
 PRODUCTS_JSON_URL   = f"{ESTATE_BASE_URL}/collections/all/products.json"
@@ -579,38 +582,99 @@ def build_heartbeat(stats: dict) -> str:
 # FCM (Firebase Cloud Messaging) helpers
 # ---------------------------------------------------------------------------
 
+def _send_fcm_v1(token: str, title: str, body: str, url: str, image_url: str) -> None:
+    """Send via FCM HTTP v1 API (requires FCM_PROJECT_ID + service account or server key)."""
+    notification = {"title": title, "body": body}
+    if image_url:
+        notification["image"] = image_url
+    message = {
+        "message": {
+            "token": token,
+            "notification": notification,
+            "webpush": {
+                "fcm_options": {"link": url},
+            },
+            "data": {"url": url},
+        }
+    }
+    resp = httpx.post(
+        f"https://fcm.googleapis.com/v1/projects/{FCM_PROJECT_ID}/messages:send",
+        headers={
+            "Authorization": f"Bearer {_get_fcm_access_token()}",
+            "Content-Type": "application/json",
+        },
+        json=message,
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
+def _send_fcm_legacy(token: str, title: str, body: str, url: str, image_url: str) -> None:
+    """Send via FCM Legacy HTTP API (key= header). Deprecated but still functional."""
+    notification = {"title": title, "body": body, "click_action": url}
+    if image_url:
+        notification["image"] = image_url
+    resp = httpx.post(
+        "https://fcm.googleapis.com/fcm/send",
+        headers={
+            "Authorization": f"key={FCM_SERVER_KEY}",
+            "Content-Type": "application/json",
+        },
+        json={"to": token, "notification": notification, "data": {"url": url}},
+        timeout=15,
+    )
+    resp.raise_for_status()
+
+
+_fcm_access_token_cache: dict = {"token": "", "expires": 0}
+
+
+def _get_fcm_access_token() -> str:
+    """Get OAuth2 access token for FCM v1 API using google-auth default credentials."""
+    import google.auth
+    import google.auth.transport.requests
+
+    now = time.time()
+    if _fcm_access_token_cache["token"] and now < _fcm_access_token_cache["expires"]:
+        return _fcm_access_token_cache["token"]
+
+    credentials, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/firebase.messaging"]
+    )
+    credentials.refresh(google.auth.transport.requests.Request())
+    _fcm_access_token_cache["token"] = credentials.token
+    _fcm_access_token_cache["expires"] = now + 3500  # tokens last ~3600s
+    return credentials.token
+
+
 def send_fcm(title: str, body: str, url: str, image_url: str = "") -> None:
     """Send FCM push notification to all registered device tokens.
-    NOTE: Uses deprecated FCM Legacy HTTP API. Migrate to FCM v1 API when convenient."""
-    if not FCM_SERVER_KEY or not FCM_DEVICE_TOKENS:
-        log.warning("FCM enabled but no server key or device tokens configured")
+    Uses v1 API if FCM_PROJECT_ID is set, otherwise falls back to legacy API."""
+    if not FCM_DEVICE_TOKENS:
+        log.warning("FCM enabled but no device tokens configured")
         return
+    if not FCM_PROJECT_ID and not FCM_SERVER_KEY:
+        log.warning("FCM enabled but neither FCM_PROJECT_ID nor FCM_SERVER_KEY set")
+        return
+
+    use_v1 = bool(FCM_PROJECT_ID)
+
     for token in FCM_DEVICE_TOKENS:
         try:
-            notification = {
-                "title": title,
-                "body": body,
-                "click_action": url,
-            }
-            if image_url:
-                notification["image"] = image_url
-            resp = httpx.post(
-                "https://fcm.googleapis.com/fcm/send",
-                headers={
-                    "Authorization": f"key={FCM_SERVER_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "to": token,
-                    "notification": notification,
-                    "data": {"url": url},
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            log.info(f"FCM notification sent to token ...{token[-6:]}")
+            if use_v1:
+                _send_fcm_v1(token, title, body, url, image_url)
+            else:
+                _send_fcm_legacy(token, title, body, url, image_url)
+            log.info(f"FCM notification sent ({'v1' if use_v1 else 'legacy'}) to token ...{token[-6:]}")
         except Exception as e:
-            log.error(f"FCM send failed: {e}")
+            log.error(f"FCM send failed ({'v1' if use_v1 else 'legacy'}): {e}")
+            # If v1 fails, try legacy as fallback
+            if use_v1 and FCM_SERVER_KEY:
+                try:
+                    _send_fcm_legacy(token, title, body, url, image_url)
+                    log.info(f"FCM notification sent (legacy fallback) to token ...{token[-6:]}")
+                except Exception as e2:
+                    log.error(f"FCM legacy fallback also failed: {e2}")
 
 
 def build_fcm_alert(item: dict, gemini_data: dict, market_est: float,
@@ -648,8 +712,10 @@ async def main() -> None:
     log.info("=== Alpha Scout starting ===")
     log.info(f"Notification mode: {'FCM' if FCM_ENABLED else 'Telegram'} | Day {(date.today() - LAUNCH_DATE).days + 1} since launch")
     log.info(f"FCM debug: LAUNCH_DATE={LAUNCH_DATE}, FCM_ENABLED={FCM_ENABLED}, "
-             f"FCM_SERVER_KEY={'set' if FCM_SERVER_KEY else 'MISSING'}, "
-             f"FCM_DEVICE_TOKENS={len(FCM_DEVICE_TOKENS)} device(s)")
+             f"FCM_PROJECT_ID={'set' if FCM_PROJECT_ID else 'unset'}, "
+             f"FCM_SERVER_KEY={'set' if FCM_SERVER_KEY else 'unset'}, "
+             f"FCM_DEVICE_TOKENS={len(FCM_DEVICE_TOKENS)} device(s), "
+             f"API={'v1' if FCM_PROJECT_ID else 'legacy'}")
 
     if DRY_RUN:
         log.info("[DRY RUN] Dry-run mode enabled — skipping Etsy calls, Telegram sends, and FCM sends")
@@ -682,6 +748,12 @@ async def main() -> None:
     # -----------------------------------------------------------------------
     history = load_history()
     history = reset_daily_gemini_counter(history)
+
+    # Reset budget on manual triggers if budget was exhausted
+    if (GITHUB_EVENT_NAME == "workflow_dispatch"
+            and history.get("gemini_calls_today", 0) >= DAILY_GEMINI_BUDGET):
+        log.warning(f"Manual trigger detected with exhausted budget ({history['gemini_calls_today']}). Resetting counter.")
+        history["gemini_calls_today"] = 0
 
     # -----------------------------------------------------------------------
     # Prune old unseen items
