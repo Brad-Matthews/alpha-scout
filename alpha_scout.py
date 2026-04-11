@@ -52,7 +52,7 @@ EBAY_ENABLED        = bool(EBAY_CLIENT_ID and EBAY_CLIENT_SECRET)
 # NOTE: FCM Legacy HTTP API (fcm.googleapis.com/fcm/send) is deprecated by Google.
 # Migrate to FCM v1 API (fcm.googleapis.com/v1/projects/{id}/messages:send with OAuth2)
 # when Google announces a sunset date. Legacy API still works as of April 2026.
-LAUNCH_DATE_STR     = os.environ.get("LAUNCH_DATE", "2026-04-05")
+LAUNCH_DATE_STR     = os.environ.get("LAUNCH_DATE", "").strip() or "2026-04-05"
 LAUNCH_DATE         = date.fromisoformat(LAUNCH_DATE_STR)
 FCM_SERVER_KEY      = os.environ.get("FCM_SERVER_KEY", "")
 FCM_DEVICE_TOKENS   = [
@@ -61,7 +61,9 @@ FCM_DEVICE_TOKENS   = [
         for i in range(1, 6)  # Supports up to 5 devices — just add secrets
     ] if t
 ]
-FCM_ENABLED         = date.today() >= LAUNCH_DATE + timedelta(days=5)
+# FCM activates 5 days after launch; also requires server key + at least one device token
+FCM_ENABLED         = (date.today() >= LAUNCH_DATE + timedelta(days=5)
+                       and bool(FCM_SERVER_KEY) and len(FCM_DEVICE_TOKENS) > 0)
 TELEGRAM_ENABLED    = not FCM_ENABLED
 
 # Dry-run mode — scrape + Gemini run normally, skip Etsy/Telegram/FCM sends
@@ -645,6 +647,9 @@ async def send_telegram(bot: Bot, text: str) -> None:
 async def main() -> None:
     log.info("=== Alpha Scout starting ===")
     log.info(f"Notification mode: {'FCM' if FCM_ENABLED else 'Telegram'} | Day {(date.today() - LAUNCH_DATE).days + 1} since launch")
+    log.info(f"FCM debug: LAUNCH_DATE={LAUNCH_DATE}, FCM_ENABLED={FCM_ENABLED}, "
+             f"FCM_SERVER_KEY={'set' if FCM_SERVER_KEY else 'MISSING'}, "
+             f"FCM_DEVICE_TOKENS={len(FCM_DEVICE_TOKENS)} device(s)")
 
     if DRY_RUN:
         log.info("[DRY RUN] Dry-run mode enabled — skipping Etsy calls, Telegram sends, and FCM sends")
