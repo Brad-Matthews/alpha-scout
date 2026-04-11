@@ -582,74 +582,10 @@ def build_heartbeat(stats: dict) -> str:
 # FCM (Firebase Cloud Messaging) helpers
 # ---------------------------------------------------------------------------
 
-def _send_fcm_v1(token: str, title: str, body: str, url: str, image_url: str) -> None:
-    """Send via FCM HTTP v1 API (requires FCM_PROJECT_ID + service account or server key)."""
-    notification = {"title": title, "body": body}
-    if image_url:
-        notification["image"] = image_url
-    message = {
-        "message": {
-            "token": token,
-            "notification": notification,
-            "webpush": {
-                "fcm_options": {"link": url},
-            },
-            "data": {"url": url},
-        }
-    }
-    resp = httpx.post(
-        f"https://fcm.googleapis.com/v1/projects/{FCM_PROJECT_ID}/messages:send",
-        headers={
-            "Authorization": f"Bearer {_get_fcm_access_token()}",
-            "Content-Type": "application/json",
-        },
-        json=message,
-        timeout=15,
-    )
-    resp.raise_for_status()
-
-
-def _send_fcm_legacy(token: str, title: str, body: str, url: str, image_url: str) -> None:
-    """Send via FCM Legacy HTTP API (key= header). Deprecated but still functional."""
-    notification = {"title": title, "body": body, "click_action": url}
-    if image_url:
-        notification["image"] = image_url
-    resp = httpx.post(
-        "https://fcm.googleapis.com/fcm/send",
-        headers={
-            "Authorization": f"key={FCM_SERVER_KEY}",
-            "Content-Type": "application/json",
-        },
-        json={"to": token, "notification": notification, "data": {"url": url}},
-        timeout=15,
-    )
-    resp.raise_for_status()
-
-
-_fcm_access_token_cache: dict = {"token": "", "expires": 0}
-
-
-def _get_fcm_access_token() -> str:
-    """Get OAuth2 access token for FCM v1 API using google-auth default credentials."""
-    import google.auth
-    import google.auth.transport.requests
-
-    now = time.time()
-    if _fcm_access_token_cache["token"] and now < _fcm_access_token_cache["expires"]:
-        return _fcm_access_token_cache["token"]
-
-    credentials, _ = google.auth.default(
-        scopes=["https://www.googleapis.com/auth/firebase.messaging"]
-    )
-    credentials.refresh(google.auth.transport.requests.Request())
-    _fcm_access_token_cache["token"] = credentials.token
-    _fcm_access_token_cache["expires"] = now + 3500  # tokens last ~3600s
-    return credentials.token
-
-
 def send_fcm(title: str, body: str, url: str, image_url: str = "") -> None:
     """Send FCM push notification to all registered device tokens.
-    Uses v1 API if FCM_PROJECT_ID is set, otherwise falls back to legacy API."""
+    Uses v1 API if FCM_PROJECT_ID is set, otherwise falls back to legacy API.
+    Server key is used directly as Bearer token — no OAuth2/service account needed."""
     if not FCM_DEVICE_TOKENS:
         log.warning("FCM enabled but no device tokens configured")
         return
@@ -657,24 +593,51 @@ def send_fcm(title: str, body: str, url: str, image_url: str = "") -> None:
         log.warning("FCM enabled but neither FCM_PROJECT_ID nor FCM_SERVER_KEY set")
         return
 
-    use_v1 = bool(FCM_PROJECT_ID)
+    use_v1 = bool(FCM_PROJECT_ID) and bool(FCM_SERVER_KEY)
 
-    for token in FCM_DEVICE_TOKENS:
+    for device_token in FCM_DEVICE_TOKENS:
         try:
             if use_v1:
-                _send_fcm_v1(token, title, body, url, image_url)
+                # FCM v1 API — server key as Bearer token
+                notification = {"title": title, "body": body}
+                if image_url:
+                    notification["image"] = image_url
+                payload = {
+                    "message": {
+                        "token": device_token,
+                        "notification": notification,
+                        "webpush": {
+                            "fcm_options": {"link": url},
+                        },
+                    }
+                }
+                resp = httpx.post(
+                    f"https://fcm.googleapis.com/v1/projects/{FCM_PROJECT_ID}/messages:send",
+                    headers={
+                        "Authorization": f"Bearer {FCM_SERVER_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=15,
+                )
             else:
-                _send_fcm_legacy(token, title, body, url, image_url)
-            log.info(f"FCM notification sent ({'v1' if use_v1 else 'legacy'}) to token ...{token[-6:]}")
+                # Legacy API fallback
+                notification = {"title": title, "body": body, "click_action": url}
+                if image_url:
+                    notification["image"] = image_url
+                resp = httpx.post(
+                    "https://fcm.googleapis.com/fcm/send",
+                    headers={
+                        "Authorization": f"key={FCM_SERVER_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={"to": device_token, "notification": notification, "data": {"url": url}},
+                    timeout=15,
+                )
+            resp.raise_for_status()
+            log.info(f"FCM notification sent ({'v1' if use_v1 else 'legacy'}) to token ...{device_token[-6:]}")
         except Exception as e:
             log.error(f"FCM send failed ({'v1' if use_v1 else 'legacy'}): {e}")
-            # If v1 fails, try legacy as fallback
-            if use_v1 and FCM_SERVER_KEY:
-                try:
-                    _send_fcm_legacy(token, title, body, url, image_url)
-                    log.info(f"FCM notification sent (legacy fallback) to token ...{token[-6:]}")
-                except Exception as e2:
-                    log.error(f"FCM legacy fallback also failed: {e2}")
 
 
 def build_fcm_alert(item: dict, gemini_data: dict, market_est: float,
